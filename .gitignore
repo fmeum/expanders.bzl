@@ -1,0 +1,4 @@
+.bazelbsp
+.idea
+bazel-*
+MODULE.bazel.lock

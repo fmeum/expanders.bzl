@@ -1,0 +1,10 @@
+load(":expander_test.bzl", "expander_test")
+
+expander_test(
+    name = "no_expansion",
+    expand = [
+        "Hello",
+        "World!",
+        "I am a test.",
+    ],
+)

@@ -1,0 +1,7 @@
+bazel_dep(name = "expanders.bzl")
+local_path_override(
+    module_name = "expanders.bzl",
+    path = "..",
+)
+
+bazel_dep(name = "bazel_lib", version = "3.0.1")
