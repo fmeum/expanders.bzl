@@ -4,7 +4,7 @@ load("@expanders.bzl", "expanders")
 def _do_expand_impl(ctx):
     # Expand with expanders.bzl.
     actual = ctx.actions.declare_file(ctx.label.name + ".actual")
-    actual_args = ctx.actions.args()
+    actual_args = ctx.actions.args().set_param_file_format("multiline")
     expander = expanders.make(
         actual_args,
         targets = ctx.attr.srcs + ctx.attr.data + ctx.outputs.outs,
@@ -18,9 +18,9 @@ def _do_expand_impl(ctx):
 
     # Expand with native Bazel functionality.
     expected = ctx.actions.declare_file(ctx.label.name + ".expected")
-    expected_args = ctx.actions.args()
+    expected_args = ctx.actions.args().set_param_file_format("multiline")
     for input in ctx.attr.expand:
-        expected_args.add(ctx.expand_location(input))
+        expected_args.add(ctx.expand_location(ctx.expand_make_variables("expand", input, {})))
     ctx.actions.write(
         output = expected,
         content = expected_args,

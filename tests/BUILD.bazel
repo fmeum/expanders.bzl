@@ -6,5 +6,7 @@ expander_test(
         "Hello",
         "World!",
         "I am a test.",
+        "export $$PATH=$$PATH:/new/path",
+        "$$",
     ],
 )
