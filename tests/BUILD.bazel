@@ -10,3 +10,13 @@ expander_test(
         "$$",
     ],
 )
+
+expander_test(
+    name = "standard_make_variables",
+    expand = [
+        "$(TARGET_CPU)",
+        "$(COMPILATION_MODE)",
+        "$(BINDIR)",
+        "$(GENDIR)",
+    ],
+)

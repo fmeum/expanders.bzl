@@ -6,6 +6,7 @@ def _do_expand_impl(ctx):
     actual = ctx.actions.declare_file(ctx.label.name + ".actual")
     actual_args = ctx.actions.args().set_param_file_format("multiline")
     expander = expanders.make(
+        ctx,
         actual_args,
         targets = ctx.attr.srcs + ctx.attr.data + ctx.outputs.outs,
     )
