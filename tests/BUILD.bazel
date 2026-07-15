@@ -1,4 +1,90 @@
-load(":expander_test.bzl", "expander_test")
+load("//:expander_test.bzl", "expander_failure_test", "expander_golden_test", "expander_test")
+load("//:support.bzl", "multi_output_binary", "tree", "write_file")
+
+package(default_visibility = ["//visibility:public"])
+
+# Fixtures.
+
+write_file(
+    name = "gen",
+    out = "gen.txt",
+    content = "generated",
+)
+
+write_file(
+    name = "gen2",
+    out = "gen2.txt",
+    content = "generated2",
+)
+
+alias(
+    name = "gen_alias",
+    actual = ":gen.txt",
+)
+
+alias(
+    name = "alias_of_alias",
+    actual = ":gen_alias",
+)
+
+alias(
+    name = "src_alias",
+    actual = "src.txt",
+)
+
+alias(
+    name = "pkg_alias",
+    actual = "//pkg:gen.txt",
+)
+
+alias(
+    name = "external_alias",
+    actual = "@bazel_lib//lib:diff_test.bzl",
+)
+
+alias(
+    name = "group_alias",
+    actual = ":mixed_group",
+)
+
+filegroup(
+    name = "mixed_group",
+    srcs = [
+        "a.txt",
+        "z.txt",
+        ":gen.txt",
+        ":gen2.txt",
+    ],
+)
+
+filegroup(
+    name = "single_group",
+    srcs = [":gen.txt"],
+)
+
+filegroup(
+    name = "empty_group",
+    srcs = [],
+)
+
+filegroup(
+    name = "nested_group",
+    srcs = [
+        "src.txt",
+        ":mixed_group",
+    ],
+)
+
+tree(name = "tree")
+
+multi_output_binary(name = "tool")
+
+alias(
+    name = "tool_alias",
+    actual = ":tool",
+)
+
+# Literals only: the fast path that retains nothing but the attribute values.
 
 expander_test(
     name = "no_expansion",
@@ -8,8 +94,16 @@ expander_test(
         "I am a test.",
         "export $$PATH=$$PATH:/new/path",
         "$$",
+        "$$$$",
+        "a$$b",
+        "100% luck, 20% skill",
+        "  leading and trailing  ",
+        "",
+        "unicode → ✓ ←",
     ],
 )
+
+# Make variables.
 
 expander_test(
     name = "standard_make_variables",
@@ -18,5 +112,377 @@ expander_test(
         "$(COMPILATION_MODE)",
         "$(BINDIR)",
         "$(GENDIR)",
+        "-I$(BINDIR)/include",
+        "$(TARGET_CPU)$(COMPILATION_MODE)",
+        "cpu=$(TARGET_CPU) mode=$(COMPILATION_MODE)",
+        "$$(BINDIR) is $(BINDIR)",
+        "$$ $(GENDIR) $$",
+    ],
+)
+
+expander_test(
+    name = "extra_vars",
+    expand = [
+        "$(FOO)",
+        "value: $(FOO).",
+        "$(FOO)$(FOO)",
+        # Extra variables take precedence over ctx.var, even for $(BINDIR).
+        "$(TARGET_CPU)",
+        "$(BINDIR)-$(FOO)",
+        # Single-character references without parentheses.
+        "x$@y",
+        "$@$@",
+    ],
+    extra_vars = {
+        "BINDIR": "custom-bindir",
+        "FOO": "foo-value",
+        "TARGET_CPU": "overridden",
+        "@": "at",
+    },
+)
+
+# Location functions, singular.
+
+expander_test(
+    name = "execpath",
+    srcs = [
+        "src.txt",
+        ":gen.txt",
+        "//pkg:gen.txt",
+        "@bazel_lib//lib:diff_test.bzl",
+    ],
+    expand = [
+        "$(execpath :gen.txt)",
+        "$(execpath gen.txt)",
+        "$(execpath //:gen.txt)",
+        "$(execpath src.txt)",
+        "$(execpath :src.txt)",
+        "$(execpath //pkg:gen.txt)",
+        "$(execpath @@//pkg:gen.txt)",
+        "$(execpath @bazel_lib//lib:diff_test.bzl)",
+        "$(execpaths @bazel_lib//lib:diff_test.bzl)",
+        "$(rootpaths @bazel_lib//lib:diff_test.bzl)",
+        "$(rlocationpaths @bazel_lib//lib:diff_test.bzl)",
+        "--opt=$(execpath :gen.txt)",
+        "$(execpath :gen.txt) $(execpath src.txt)",
+        "$(execpath :gen.txt)$(execpath :gen.txt)",
+        "$(location :gen.txt)",
+        "$(location src.txt)",
+    ],
+)
+
+expander_test(
+    name = "rootpath",
+    srcs = [
+        "src.txt",
+        ":gen.txt",
+        "//pkg:gen.txt",
+        "@bazel_lib//lib:diff_test.bzl",
+    ],
+    expand = [
+        "$(rootpath :gen.txt)",
+        "$(rootpath src.txt)",
+        "$(rootpath //pkg:gen.txt)",
+        "$(rootpath @bazel_lib//lib:diff_test.bzl)",
+        "--opt=$(rootpath :gen.txt) $(rootpath src.txt)",
+    ],
+)
+
+expander_test(
+    name = "rlocationpath",
+    srcs = [
+        "src.txt",
+        ":gen.txt",
+        "//pkg:gen.txt",
+        "@bazel_lib//lib:diff_test.bzl",
+    ],
+    expand = [
+        "$(rlocationpath :gen.txt)",
+        "$(rlocationpath src.txt)",
+        "$(rlocationpath //pkg:gen.txt)",
+        "$(rlocationpath @bazel_lib//lib:diff_test.bzl)",
+        "--opt=$(rlocationpath :gen.txt) $(rlocationpath src.txt)",
+    ],
+)
+
+# Location functions, plural.
+
+expander_test(
+    name = "plurals",
+    data = [
+        ":gen.txt",
+        ":mixed_group",
+        ":nested_group",
+        ":single_group",
+    ],
+    expand = [
+        "$(execpaths :mixed_group)",
+        "$(rootpaths :mixed_group)",
+        "$(rlocationpaths :mixed_group)",
+        "$(locations :mixed_group)",
+        "$(execpaths :single_group)",
+        "$(locations :gen.txt)",
+        "$(execpaths :nested_group)",
+        "files: [$(locations :mixed_group)]",
+    ],
+)
+
+# Aliases must be referenced by their own label, faithfully to native
+# expansion, even though target.label points at the actual target.
+
+expander_test(
+    name = "aliases",
+    srcs = [
+        ":alias_of_alias",
+        ":external_alias",
+        ":gen_alias",
+        ":pkg_alias",
+        ":src_alias",
+    ],
+    data = [
+        # An alias and its actual target have distinct dependency labels, so
+        # both can be in targets and are addressed by their own label.
+        "gen.txt",
+        ":group_alias",
+    ],
+    expand = [
+        "$(execpath :gen.txt)",
+        "$(execpath :gen_alias)",
+        "$(rootpath :gen_alias)",
+        "$(rlocationpath :gen_alias)",
+        "$(execpath //:gen_alias)",
+        "$(execpath :alias_of_alias)",
+        "$(execpath :src_alias)",
+        "$(execpath :pkg_alias)",
+        "$(execpath :external_alias)",
+        "$(locations :group_alias)",
+        # The actual target behind an alias in srcs is implicitly
+        # addressable (AliasProvider#getDependencyLabels).
+        "$(rootpath //pkg:gen.txt)",
+    ],
+)
+
+# Executable targets whose default outputs are not a single file expand to
+# the executable (--incompatible_locations_prefers_executable default). The
+# tool is in data, which is not implicitly collected by location expansion,
+# so only the explicitly passed target with its executable preference is
+# visible.
+
+expander_test(
+    name = "executable_preference",
+    data = [
+        ":tool",
+        ":tool_alias",
+    ],
+    expand = [
+        "$(execpath :tool)",
+        "$(execpaths :tool)",
+        "$(rootpath :tool)",
+        "$(rlocationpath :tool)",
+        "$(location :tool)",
+        "$(locations :tool)",
+        "run: $(execpath :tool) --version",
+        "$(execpath :tool_alias)",
+    ],
+)
+
+# Prerequisites of an attribute named "srcs" are implicitly addressable and
+# expand to their files (no executable preference), merged as a set with the
+# executable contributed by the explicitly passed target.
+
+expander_test(
+    name = "executable_in_srcs",
+    srcs = [":tool"],
+    expand = [
+        "$(execpaths :tool)",
+        "$(locations :tool)",
+    ],
+)
+
+# Prerequisites of an attribute named "tools" are implicitly addressable and
+# expand to their executable, without going through the targets list at all.
+
+expander_test(
+    name = "executable_in_tools",
+    expand = [
+        "$(execpath :tool)",
+        "$(execpaths :tool)",
+        "$(rootpath :tool)",
+    ],
+    tools = [":tool"],
+)
+
+# Predeclared outputs are implicitly addressable in location expressions.
+
+expander_test(
+    name = "predeclared_outputs",
+    outs = [
+        "dir/out2.txt",
+        "out1.txt",
+    ],
+    expand = [
+        "$(execpath out1.txt)",
+        "$(location :out1.txt)",
+        "$(rootpath //:out1.txt)",
+        "$(rlocationpath out1.txt)",
+        "$(execpaths dir/out2.txt)",
+        "--out=$(execpath dir/out2.txt)",
+    ],
+)
+
+# Tree artifacts expand to the directory path.
+
+expander_test(
+    name = "tree_artifacts",
+    srcs = [":tree"],
+    expand = [
+        "$(execpath :tree)",
+        "$(rootpath :tree)",
+        "$(rlocationpath :tree)",
+        "$(execpaths :tree)",
+        "--dir=$(execpath :tree)/sub",
+    ],
+)
+
+# Everything at once.
+
+expander_test(
+    name = "kitchen_sink",
+    srcs = [
+        "src.txt",
+        ":gen.txt",
+        "//pkg:gen.txt",
+    ],
+    data = [":mixed_group"],
+    expand = [
+        "",
+        "cp $(execpath :gen.txt) $(BINDIR)/out-$(TARGET_CPU).txt $$HOME",
+        "unicode → $(TARGET_CPU) ← ✓",
+        "$(execpath :gen.txt):$(rootpath src.txt):$(rlocationpath //pkg:gen.txt)",
+        "$$ $(GENDIR) $$",
+        "[$(locations :mixed_group)] $(COMPILATION_MODE)",
+        "$(BINDIR)/$(execpath :gen.txt)",
+    ],
+)
+
+# Errors mirror the ones reported by native expansion (verbatim messages,
+# including the quirk that they always refer to $(location)/$(locations)
+# regardless of the actual function).
+
+expander_failure_test(
+    name = "fail_singular_with_multiple_files",
+    data = [":mixed_group"],
+    expand = "$(location :mixed_group)",
+    msg = "label '//:mixed_group' in $(location) expression expands to more than one file, please use $(locations //:mixed_group) instead.  Files (at most 5 shown) are:",
+)
+
+expander_failure_test(
+    name = "fail_execpath_with_multiple_files",
+    data = [":mixed_group"],
+    expand = "$(execpath :mixed_group)",
+    msg = "label '//:mixed_group' in $(location) expression expands to more than one file",
+)
+
+expander_failure_test(
+    name = "fail_unknown_label",
+    expand = "$(execpath :doesnotexist)",
+    msg = "label '//:doesnotexist' in $(location) expression is not a declared prerequisite of this rule",
+)
+
+# The actual target behind an alias passed only via the explicit targets
+# list is not addressable, just like in native expansion. (Via an implicitly
+# collected attribute such as srcs, it would be.)
+expander_failure_test(
+    name = "fail_alias_actual_label",
+    data = [":gen_alias"],
+    expand = "$(execpath :gen.txt)",
+    msg = "label '//:gen.txt' in $(location) expression is not a declared prerequisite of this rule",
+)
+
+# The union of the executable (from the explicit targets) and the files
+# (from the implicitly collected srcs attribute) has more than one file.
+expander_failure_test(
+    name = "fail_executable_in_srcs_singular",
+    srcs = [":tool"],
+    expand = "$(execpath :tool)",
+    msg = "label '//:tool' in $(location) expression expands to more than one file",
+)
+
+expander_failure_test(
+    name = "fail_no_files",
+    data = [":empty_group"],
+    expand = "$(locations :empty_group)",
+    msg = "label '//:empty_group' in $(locations) expression expands to no files",
+)
+
+expander_failure_test(
+    name = "fail_empty_label",
+    expand = "$(locations )",
+    msg = "invalid label in $(locations) expression: invalid target name '': empty target name",
+)
+
+expander_failure_test(
+    name = "fail_unknown_variable",
+    expand = "$(NOPE)",
+    msg = "$(NOPE) not defined",
+)
+
+expander_failure_test(
+    name = "fail_unknown_function",
+    srcs = [":gen.txt"],
+    expand = "$(frobnicate :gen.txt)",
+    msg = "$(frobnicate) not defined",
+)
+
+expander_failure_test(
+    name = "fail_single_char_variable",
+    expand = "a $@ b",
+    msg = "$(@) not defined",
+)
+
+expander_failure_test(
+    name = "fail_unterminated_dollar",
+    expand = "end $",
+    msg = "unterminated $",
+)
+
+expander_failure_test(
+    name = "fail_unterminated_reference",
+    expand = "$(TARGET_CPU",
+    msg = "unterminated variable reference",
+)
+
+expander_failure_test(
+    name = "fail_duplicate_targets",
+    srcs = [":gen.txt"],
+    data = [":gen.txt"],
+    expand = "$(execpath :gen.txt)",
+    msg = "Label \"//:gen.txt\" is found more than once in 'targets' list.",
+)
+
+# Native expansion would recursively expand the "$" in the value; this
+# library rejects such values instead.
+expander_failure_test(
+    name = "fail_recursive_make_variable",
+    expand = "$(RECURSIVE)",
+    extra_vars = {"RECURSIVE": "cpu=$(TARGET_CPU)"},
+    msg = "expanders.bzl does not support the recursive expansion of make variable values",
+)
+
+# Intentional divergence from the two-pass native expansion: "$$" always
+# escapes, so "$$(location ...)" stays literal, exactly as in genrules. The
+# native composition would first expand the location reference (and then fail
+# on the resulting "$<path>").
+
+expander_golden_test(
+    name = "escaped_location",
+    srcs = [":gen.txt"],
+    expand = [
+        "$$(execpath :gen.txt)",
+        "a$$(locations :gen.txt)b",
+    ],
+    golden = [
+        "$(execpath :gen.txt)",
+        "a$(locations :gen.txt)b",
     ],
 )

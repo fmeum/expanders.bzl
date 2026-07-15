@@ -1,0 +1,70 @@
+load("//:support.bzl", "write_file")
+load(":defs.bzl", "eager_expand", "expand_strings", "lazy_expand", "null_expand")
+
+# Fixtures: a handful of generated files plus a 20-file group.
+
+[
+    write_file(
+        name = "gen%d" % i,
+        out = "gen%d.txt" % i,
+        content = "x",
+    )
+    for i in range(8)
+]
+
+[
+    write_file(
+        name = "grp%d" % i,
+        out = "grp%d.txt" % i,
+        content = "x",
+    )
+    for i in range(20)
+]
+
+filegroup(
+    name = "group",
+    srcs = ["grp%d.txt" % i for i in range(20)],
+)
+
+# The expand strings include the target index so that expanded strings are
+# unique across targets and cannot be deduplicated or shared.
+
+SRCS = ["gen%d.txt" % i for i in range(8)]
+
+N = 400
+
+[
+    [
+        null_expand(
+            name = "null%d" % i,
+            srcs = SRCS,
+            data = [":group"],
+            expand = expand_strings(i),
+            tags = ["manual"],
+        ),
+        lazy_expand(
+            name = "lazy%d" % i,
+            srcs = SRCS,
+            data = [":group"],
+            expand = expand_strings(i),
+            tags = ["manual"],
+        ),
+        eager_expand(
+            name = "eager%d" % i,
+            srcs = SRCS,
+            data = [":group"],
+            expand = expand_strings(i),
+            tags = ["manual"],
+        ),
+    ]
+    for i in range(N)
+]
+
+[
+    filegroup(
+        name = "all_%s" % kind,
+        srcs = ["%s%d" % (kind, i) for i in range(N)],
+        tags = ["manual"],
+    )
+    for kind in ("null", "lazy", "eager")
+]

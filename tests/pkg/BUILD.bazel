@@ -1,0 +1,40 @@
+load("//:expander_test.bzl", "expander_test")
+load("//:support.bzl", "write_file")
+
+package(default_visibility = ["//visibility:public"])
+
+write_file(
+    name = "gen",
+    out = "gen.txt",
+    content = "pkg generated",
+)
+
+# The rule name contains a slash to exercise output paths in subdirectories.
+expander_test(
+    name = "dir/standard_make_variables",
+    expand = [
+        "$(TARGET_CPU)",
+        "$(COMPILATION_MODE)",
+        "$(BINDIR)",
+        "$(GENDIR)",
+    ],
+)
+
+# Cross-package and package-relative label resolution.
+expander_test(
+    name = "cross_package",
+    srcs = [
+        "pkg_src.txt",
+        ":gen.txt",
+        "//:gen.txt",
+        "//:src.txt",
+    ],
+    expand = [
+        "$(execpath :gen.txt)",
+        "$(execpath gen.txt)",
+        "$(execpath //pkg:gen.txt)",
+        "$(execpath //:gen.txt)",
+        "$(rootpath //:src.txt)",
+        "$(rlocationpath pkg_src.txt)",
+    ],
+)
