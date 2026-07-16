@@ -58,7 +58,10 @@ def root_token(anchor_file):
     return (anchor_file, "b")
 
 def location_token(fn, files, workspace_name):
-    if fn == "location" or fn == "execpath":
+    # A plural exec path expansion of a single file renders exactly like the
+    # singular form (sorting and joining are no-ops), so it can use the
+    # cheaper bare-File encoding and the emission strategies enabled by it.
+    if fn == "location" or fn == "execpath" or ((fn == "locations" or fn == "execpaths") and len(files) == 1):
         return files[0]
     elif fn == "rootpath":
         return (files[0], "r")

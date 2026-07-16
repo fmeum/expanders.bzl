@@ -219,9 +219,9 @@ content):
 | input shape | eager | lazy |
 |---|---|---|
 | plain literal (no `$`) | (36 + L)/k | 4 |
-| `"$(execpath :own_output)"` (unique content) | ≈ 96 | 12 |
-| `"--flag=$(execpath :own_output)"` | ≈ 104 | ≈ 92 (substring dominates) |
-| `"--tool=$(execpath //shared:tool)"` | ≈ 104/k → ~0 | ≈ 92 |
+| `"$(execpath :own_output)"` (unique content) | ≈ 96 | **4** (plain `args.add(file)`) |
+| `"--flag=$(execpath :own_output)"` | ≈ 104 | ≈ 60 (`format =`: 3 slots + format string) |
+| `"--tool=$(execpath //shared:tool)"` | ≈ 104/k → ~0 | ≈ 60 |
 | `"$(TARGET_CPU)"`, `"a $(VAR) b"` | ≈ (36 + L)/k → ~0 | 28–170 |
 | `"$(execpaths :group)"`, n = 20 | ≈ 1,160 | ≈ 56 (+ 112 shared once) |
 | `"$(BINDIR)"` | ≈ 80/k → ~0 | 44 + anchor once |
@@ -240,11 +240,30 @@ token encoding across the board — see §7.
    single-pass `$$`/error semantics stay in the parser. A special case falls
    out for free: a whole-string `$(VAR)` becomes `args.add(<shared value>)` —
    4 bytes, zero copies.
-2. **Keep the lazy path for anything containing a location function or
-   `$(BINDIR)`/`$(GENDIR)`** — it is both smaller (except for the marginal
-   composite case, which is a wash) and the only form that path-maps.
+2. **Use `args.add(file[, format = ...])` when exactly one token is a
+   singular exec path.** `Args` keeps the `File` and formats its exec path
+   lazily (`SingleFormattedArg`), so this is path mapping aware while
+   retaining just 1 slot (whole-string case) or 3 slots plus one format
+   string with the static tokens folded in (`%` escaped as `%%`) — no
+   tuples, no `VectorArg` machinery, and at most one fresh string even when
+   the file has both a prefix and a suffix. Directories, which `Args.add`
+   rejects, use a singleton `args.add_all(..., expand_directories = False)`
+   instead: 2 slots for a whole-string expansion (no `map_each` means no
+   location slot either), or 3 slots plus a `format_each` string for
+   composites. Singleton *plural* exec expansions are downgraded to the
+   bare-`File` encoding first, since sorting and joining one path are
+   no-ops. One caveat keeps some arguments on the generic path: default
+   `File` stringification is the raw exec path, which differs from location
+   expansion's `./` prefix for paths without a `/` (root-package source
+   files). Format strings are retained per action (`Args.add` interns
+   scalar *values*, not formats — see §8.2).
+3. **Keep the generic lazy token path for everything else** — plurals,
+   `rootpath`/`rlocationpath`, `$(BINDIR)`/`$(GENDIR)` and make variable
+   values embedding the output directory (which expand to anchor-root
+   tokens so that they path-map), tree artifacts, and arguments with more
+   than one dynamic token.
 
-Both strategies evaluate the same token-rendering function, so their output
+All strategies evaluate the same token-rendering function, so their output
 is identical by construction.
 
 Behavioral details of native expansion discovered during this analysis
@@ -264,13 +283,13 @@ expected impact for location/make-variable expansion workloads:
    retain literal segments as fresh Starlark substrings (≈ 36 + L bytes
    each, §2), spans would retain 8 bytes per segment and *zero* new strings,
    and every rule would get path-mappable expansion without a library.
-2. **Intern strings on the vector path.** `Args.add` interns scalar strings
-   (`Args.java:524`) but `add_all`/`add_joined` values are stored as-is.
-   Interning them (perhaps only short ones, to bound the CPU cost on large
-   value lists) would make repeated literal fragments such as `"--flag="`
-   free across targets — the last case where eager expansion can beat the
-   lazy encoding on memory — and would also deduplicate `map_each`-free
-   string lists across actions.
+2. **Intern strings on the vector path and format strings.** `Args.add`
+   interns scalar strings (`Args.java:524`) but `add_all`/`add_joined`
+   values and `format =` strings are stored as-is. Interning them (perhaps
+   only short ones, to bound the CPU cost on large value lists) would make
+   repeated literal fragments such as `"--flag="` and repeated
+   `"--flag=%s"` format strings free across targets — the last cases where
+   eager expansion can beat the lazy encodings on memory.
 3. **Trim the per-call `VectorArg` slots.** The `Location` stored for
    `map_each` error reporting is the call site's own
    `CallExpression#lparenLocation`, so it could join the interned

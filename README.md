@@ -90,7 +90,12 @@ behaviors that are easy to miss:
 
 * **Make variables**: `$(VAR)` and single-character references such as `$@`
   are looked up in `extra_vars` first (mirroring `additional_substitutions`),
-  then `ctx.var`. `$$` escapes to `$`.
+  then `ctx.var`. `$$` escapes to `$`. Values are recursively expanded (Make
+  `:=` semantics, up to a depth of 10, except when a value is exactly the
+  variable's own name), with the same errors as native expansion on cycles,
+  overly deep chains and location functions inside values. Values embedding
+  the output directory path — such as toolchain-provided variables pointing
+  at generated tools — additionally become subject to path mapping.
 * **Location functions**: `location`/`locations` (synonyms of
   `execpath`/`execpaths`), `rootpath(s)` and `rlocationpath(s)`. Singular
   functions fail if the target expands to more than one file. Paths that do
@@ -126,10 +131,6 @@ behaviors that are easy to miss:
   `$(location //foo)`, exactly as in genrules. The native two-pass
   composition instead expands the location reference (and then typically
   fails on the leftover `$`).
-* Make variable values containing `$` are rejected with an error.
-  `ctx.expand_make_variables` recursively expands such values (Make `:=`
-  semantics, depth ≤ 10); supporting this faithfully *and* lazily is
-  possible but deliberately out of scope.
 * `--incompatible_locations_prefers_executable=false` is not supported: the
   library always applies the default behavior. Observing the actual flag
   value would require every rule using the library to declare an implicit

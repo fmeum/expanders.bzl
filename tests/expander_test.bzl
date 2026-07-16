@@ -28,11 +28,17 @@ def _do_expand_impl(ctx):
         ctx.actions.write(out, "")
 
     targets = ctx.attr.srcs + ctx.attr.data
-    expander = expanders.make(ctx, targets = targets, extra_vars = ctx.attr.extra_vars)
+
+    # An extra variable whose value embeds the output directory path, like
+    # toolchain-provided variables pointing at generated tools do.
+    extra_vars = dict(ctx.attr.extra_vars)
+    extra_vars["TEST_BINDIR_TOOL"] = ctx.bin_dir.path + "/injected/tool"
+
+    expander = expanders.make(ctx, targets = targets, extra_vars = extra_vars)
 
     if ctx.attr.with_expected:
         expanded = [
-            ctx.expand_make_variables("expand", ctx.expand_location(input, targets), ctx.attr.extra_vars)
+            ctx.expand_make_variables("expand", ctx.expand_location(input, targets), extra_vars)
             for input in ctx.attr.expand
         ]
     else:

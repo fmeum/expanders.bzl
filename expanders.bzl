@@ -29,14 +29,13 @@ with the following differences:
   * Because paths are computed late, they are automatically subject to path
     mapping (--experimental_output_paths=strip) if the consuming action
     supports it. This includes $(BINDIR) and $(GENDIR), which are expanded
-    via the root of an anchor file rather than as a constant string.
+    via the root of an anchor file rather than as a constant string, as well
+    as any make variable whose value embeds the output directory path (such
+    as toolchain-provided variables pointing at generated tools).
   * "$$" always escapes: "$$(location //foo)" expands to the literal
     "$(location //foo)" as it does in genrules. The native two-pass
     composition above instead expands the location reference and keeps the
     escaped "$".
-  * Make variable values containing "$" are rejected with an error instead of
-    being recursively expanded (Make ":=" semantics) as
-    ctx.expand_make_variables would do.
   * --incompatible_locations_prefers_executable is assumed to be true (its
     default): a target providing an executable expands to the executable if
     its default outputs are not exactly one file. Observing the actual flag
@@ -229,27 +228,85 @@ def _anchor_file(ctx, state):
         state["anchor"] = anchor
     return anchor
 
-def _var_value_token(name, value):
-    # ctx.expand_make_variables recursively expands "$" references in make
-    # variable values (Make ":=" semantics, up to depth 10, except when the
-    # value is exactly the variable's name). expanders.bzl does not support
-    # this and fails instead of silently emitting the unexpanded value.
-    if "$" in value and value != name:
-        fail(("the value of $(%s) is \"%s\", which contains \"$\": expanders.bzl does not " +
-              "support the recursive expansion of make variable values performed by " +
-              "ctx.expand_make_variables") % (name, value))
-    return var_token(value)
+def _split_on_output_dir(ctx, state, piece):
+    """Splits a literal piece on occurrences of the output bin directory path.
+
+    Make variable values provided by toolchains can embed paths under the
+    output directory (e.g. paths to generated tools). Replacing each
+    occurrence with the lazily evaluated root path of the anchor file keeps
+    such values byte-identical while making them subject to path mapping.
+    """
+    bin_dir = ctx.bin_dir.path
+    if bin_dir not in piece:
+        return [piece]
+    tokens = []
+    for i, part in enumerate(piece.split(bin_dir)):
+        if i > 0:
+            tokens.append(root_token(_anchor_file(ctx, state)))
+        if part:
+            tokens.append(part)
+    return tokens
 
 def _resolve_var(ctx, extra_vars, state, name):
-    # Extra variables take precedence over ctx.var, just like the
-    # additional_substitutions parameter of ctx.expand_make_variables.
-    if name in extra_vars:
-        return _var_value_token(name, extra_vars[name])
-    if name == "BINDIR" or (name == "GENDIR" and ctx.genfiles_dir.path == ctx.bin_dir.path):
-        return root_token(_anchor_file(ctx, state))
-    if name in ctx.var:
-        return _var_value_token(name, ctx.var[name])
-    fail("$(%s) not defined" % name)
+    """Returns the expansion tokens for a make variable reference.
+
+    Mirrors TemplateExpander: make variable values are recursively expanded
+    (Make ":=" semantics), except when a value is exactly the name of its
+    variable. The recursion depth check applies to every recursively reached
+    value, even one without any "$", just like in native expansion.
+
+    Starlark forbids recursive functions, so the recursion over nested
+    values is driven by an explicit stack of (depth, payload) items: a
+    positive depth marks a variable reference in a value expanded at that
+    depth, -1 a literal piece of a value and -2 a location function in a
+    value, which native expansion does not support. Items are pushed in
+    reverse so that they are processed (and errors are reported) in the
+    left-to-right order of native expansion.
+    """
+    tokens = []
+    stack = [(1, name)]
+    for _ in range(1 << 30):
+        if not stack:
+            return tokens
+        depth, payload = stack.pop()
+        if depth == -1:
+            tokens.extend(_split_on_output_dir(ctx, state, payload))
+            continue
+        if depth == -2:
+            fail("$(%s) not defined" % payload)
+
+        # Extra variables take precedence over ctx.var, just like the
+        # additional_substitutions parameter of ctx.expand_make_variables.
+        if payload in extra_vars:
+            value = extra_vars[payload]
+        elif payload == "BINDIR" or (payload == "GENDIR" and ctx.genfiles_dir.path == ctx.bin_dir.path):
+            tokens.append(root_token(_anchor_file(ctx, state)))
+            continue
+        elif payload in ctx.var:
+            value = ctx.var[payload]
+        else:
+            fail("$(%s) not defined" % payload)
+
+        if value == payload:
+            # Native expansion appends such values verbatim, without
+            # recursing (and thus without unescaping "$$").
+            tokens.append(var_token(value))
+            continue
+        if depth > 10:
+            fail("potentially unbounded recursion during expansion of '%s'" % value)
+        if "$" not in value:
+            tokens.extend(_split_on_output_dir(ctx, state, value))
+            continue
+        items = []
+        for kind, piece in parse(value):
+            if kind == LIT:
+                items.append((-1, piece))
+            elif kind == VAR:
+                items.append((depth + 1, piece))
+            else:
+                items.append((-2, piece[0]))
+        stack.extend(reversed(items))
+    fail("unreachable")
 
 def _resolve_label(ctx, fn, label_string):
     """Resolves a label string like native location expansion does.
@@ -348,7 +405,7 @@ def _expand(ctx, explicit, targets, extra_vars, state, args, input):
         if kind == LIT:
             tokens.append(payload)
         elif kind == VAR:
-            tokens.append(_resolve_var(ctx, extra_vars, state, payload))
+            tokens.extend(_resolve_var(ctx, extra_vars, state, payload))
         else:
             tokens.append(_resolve_location(ctx, explicit, targets, state, payload[0], payload[1]))
 

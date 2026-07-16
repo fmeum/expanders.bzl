@@ -141,6 +141,44 @@ expander_test(
     },
 )
 
+# Make variable values are recursively expanded (Make ":=" semantics), and
+# values embedding the output directory path are path mapped.
+
+expander_test(
+    name = "recursive_vars",
+    expand = [
+        "$(A)",
+        "p $(A) s",
+        "<$(E)>",
+        "$(C) $(PATH)",
+        "$(V0)",
+        "$(BINTOOLS)",
+        "--tool=$(TEST_BINDIR_TOOL)",
+        "$(TEST_BINDIR_TOOL)/sub",
+    ],
+    extra_vars = {
+        "A": "x$(B)y",
+        "B": "$(TARGET_CPU)",
+        "E": "a$$b",
+        "C": "$@",
+        "@": "at",
+        # A value that is exactly the variable's name is not recursed into.
+        "PATH": "PATH",
+        # The deepest chain native expansion allows: values at depths 1-10.
+        "V0": "$(V1)",
+        "V1": "$(V2)",
+        "V2": "$(V3)",
+        "V3": "$(V4)",
+        "V4": "$(V5)",
+        "V5": "$(V6)",
+        "V6": "$(V7)",
+        "V7": "$(V8)",
+        "V8": "$(V9)",
+        "V9": "done",
+        "BINTOOLS": "$(BINDIR)/tools",
+    },
+)
+
 # Location functions, singular.
 
 expander_test(
@@ -164,6 +202,10 @@ expander_test(
         "$(rootpaths @bazel_lib//lib:diff_test.bzl)",
         "$(rlocationpaths @bazel_lib//lib:diff_test.bzl)",
         "--opt=$(execpath :gen.txt)",
+        "--opt=$(execpath :gen.txt) suffix",
+        # "%" in literals must survive the format-string emission strategy.
+        "50% of $(execpath :gen.txt)",
+        "%s %% $(execpath :gen.txt) %d",
         "$(execpath :gen.txt) $(execpath src.txt)",
         "$(execpath :gen.txt)$(execpath :gen.txt)",
         "$(location :gen.txt)",
@@ -341,6 +383,8 @@ expander_test(
         "$(rlocationpath :tree)",
         "$(execpaths :tree)",
         "--dir=$(execpath :tree)/sub",
+        # "%" in literals must survive the format_each emission strategy.
+        "100% of $(execpath :tree)",
     ],
 )
 
@@ -460,13 +504,44 @@ expander_failure_test(
     msg = "Label \"//:gen.txt\" is found more than once in 'targets' list.",
 )
 
-# Native expansion would recursively expand the "$" in the value; this
-# library rejects such values instead.
+# Recursive make variable expansion fails like native expansion does: on
+# cycles, on chains deeper than 10 values (even if the 11th value contains no
+# "$") and on location functions inside values.
 expander_failure_test(
-    name = "fail_recursive_make_variable",
-    expand = "$(RECURSIVE)",
-    extra_vars = {"RECURSIVE": "cpu=$(TARGET_CPU)"},
-    msg = "expanders.bzl does not support the recursive expansion of make variable values",
+    name = "fail_recursion_cycle",
+    expand = "$(A)",
+    extra_vars = {
+        "A": "$(B)",
+        "B": "$(A)",
+    },
+    msg = "potentially unbounded recursion during expansion of '$(B)'",
+)
+
+expander_failure_test(
+    name = "fail_recursion_depth",
+    expand = "$(V0)",
+    extra_vars = {
+        "V0": "$(V1)",
+        "V1": "$(V2)",
+        "V2": "$(V3)",
+        "V3": "$(V4)",
+        "V4": "$(V5)",
+        "V5": "$(V6)",
+        "V6": "$(V7)",
+        "V7": "$(V8)",
+        "V8": "$(V9)",
+        "V9": "$(V10)",
+        "V10": "done",
+    },
+    msg = "potentially unbounded recursion during expansion of 'done'",
+)
+
+expander_failure_test(
+    name = "fail_location_in_value",
+    srcs = [":gen.txt"],
+    expand = "$(L)",
+    extra_vars = {"L": "$(execpath :gen.txt)"},
+    msg = "$(execpath) not defined",
 )
 
 # Intentional divergence from the two-pass native expansion: "$$" always
