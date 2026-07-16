@@ -88,9 +88,19 @@ return `MutableStarlarkList`, which carries `size`, `iteratorCount` and
 `mutability` fields on top of the array — 24 B plus potential capacity slack,
 even once frozen.
 
-`ctx.var` is a per-rule-context cached dict (`StarlarkRuleContext.var()`,
-line 833); its value strings come from configuration/toolchain maps that are
-retained for the build anyway, so referencing them is free.
+`ctx.var` materializes one `Dict` per rule context on first access
+(`StarlarkRuleContext.var()`), sized by the number of visible make variables
+— a handful globally, a few dozen when a C++ toolchain contributes. That is
+not a retention concern: `StarlarkRuleContext#close` nulls
+`cachedMakeVariables` when the rule's analysis completes, so the dict is
+analysis-phase garbage, and it is built at most once per rule, whereas eager
+expansion constructs a fresh `ConfigurationMakeVariableContext` on every
+`ctx.expand_make_variables` call. Its entries are copied by reference from
+the suppliers' retained maps (`collectMakeVariables` → `putAll`), so the
+value strings a token retains are shared with the configuration and
+toolchain providers. (Suppliers may compute the occasional value on demand;
+a token retaining such a value costs the same as eager expansion would, and
+whole-string `$(VAR)` arguments are interned via `args.add` regardless.)
 
 ## 2. Retained cost per token (this library)
 
@@ -255,8 +265,10 @@ token encoding across the board — see §7.
    no-ops. One caveat keeps some arguments on the generic path: default
    `File` stringification is the raw exec path, which differs from location
    expansion's `./` prefix for paths without a `/` (root-package source
-   files). Format strings are retained per action (`Args.add` interns
-   scalar *values*, not formats — see §8.2).
+   files). The dynamically built format string is retained per action —
+   unlike typical `.bzl`-literal format strings, which are shared per call
+   site, and unlike `Args.add`'s scalar string values, which are interned;
+   it still never exceeds the literal substrings it replaces (§8.2).
 3. **Keep the generic lazy token path for everything else** — plurals,
    `rootpath`/`rlocationpath`, `$(BINDIR)`/`$(GENDIR)` and make variable
    values embedding the output directory (which expand to anchor-root
@@ -283,13 +295,16 @@ expected impact for location/make-variable expansion workloads:
    retain literal segments as fresh Starlark substrings (≈ 36 + L bytes
    each, §2), spans would retain 8 bytes per segment and *zero* new strings,
    and every rule would get path-mappable expansion without a library.
-2. **Intern strings on the vector path and format strings.** `Args.add`
-   interns scalar strings (`Args.java:524`) but `add_all`/`add_joined`
-   values and `format =` strings are stored as-is. Interning them (perhaps
-   only short ones, to bound the CPU cost on large value lists) would make
-   repeated literal fragments such as `"--flag="` and repeated
-   `"--flag=%s"` format strings free across targets — the last cases where
-   eager expansion can beat the lazy encodings on memory.
+2. **Intern strings on the vector path.** `Args.add` interns scalar strings
+   (`Args.java:524`) but `add_all`/`add_joined` values are stored as-is.
+   Interning them (perhaps only short ones, to bound the CPU cost on large
+   value lists) would make repeated dynamically produced fragments such as
+   this library's `"--flag="` substrings free across targets — the last
+   case where eager expansion can beat the lazy encodings on memory.
+   Format strings, by contrast, are not worth interning upstream: they are
+   typically `.bzl` literals and thus already shared per call site; only
+   dynamically built ones (as in this library's format strategy) are fresh
+   per rule instance.
 3. **Trim the per-call `VectorArg` slots.** The `Location` stored for
    `map_each` error reporting is the call site's own
    `CallExpression#lparenLocation`, so it could join the interned
