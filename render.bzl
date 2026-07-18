@@ -1,3 +1,11 @@
+"""Execution-time rendering of expansion tokens.
+
+Only the map_each callbacks and their helpers live here: the Args objects of
+every rule using this library retain references to these functions, which
+transitively pin their module. Keeping this module free of analysis-time
+machinery keeps that footprint minimal.
+"""
+
 load(":parse.bzl", "LIT", "VAR", "parse")
 
 visibility("private")
@@ -144,20 +152,3 @@ def rlocationpath(file, workspace_name):
 
 def root_token(anchor_file):
     return (anchor_file, "b")
-
-def location_token(fn, files, workspace_name):
-    # A plural exec path expansion of a single file renders exactly like the
-    # singular form (sorting and joining are no-ops), so it can use the
-    # cheaper bare-File encoding and the emission strategies enabled by it.
-    if fn == "location" or fn == "execpath" or ((fn == "locations" or fn == "execpaths") and len(files) == 1):
-        return files[0]
-    elif fn == "rootpath":
-        return (files[0], "r")
-    elif fn == "rlocationpath":
-        return (files[0], "R", workspace_name)
-    elif fn == "locations" or fn == "execpaths":
-        return (files, "e")
-    elif fn == "rootpaths":
-        return (files, "r")
-    else:
-        return (files, "R", workspace_name)

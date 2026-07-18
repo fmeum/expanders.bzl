@@ -238,10 +238,10 @@ content):
 | `"$(execpaths :group)"`, n = 20 | ≈ 1,160 | ≈ 56 (+ 112 shared once) |
 | `"$(BINDIR)"` | ≈ 80/k → ~0 | 44 + anchor once |
 
-The var-only and literal rows are why `cost_model.bzl` does not use the
+The var-only and literal rows are why the emitter does not use the
 token encoding across the board — see §7.
 
-## 7. The cost model (implemented in `cost_model.bzl`)
+## 7. The cost model (implemented in `expanders.bzl`'s emitter)
 
 1. **Emit eagerly when no token references a `File`.** For inputs consisting
    only of literals, escapes and make variables, the resolved token values

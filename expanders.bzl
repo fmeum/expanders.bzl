@@ -53,9 +53,8 @@ alias and, for the implicitly collected attributes only, also by the label of
 the actual target. Passing the same label twice in targets is an error.
 """
 
-load(":cost_model.bzl", "emit")
-load(":ops.bzl", "callable_path", "location_token", "root_token")
-load(":parse.bzl", "LIT", "LOC", "VAR", "parse")
+load(":parse.bzl", "LIT", "VAR", "parse")
+load(":render.bzl", "MAIN_WORKSPACE", "callable_path", "expand_token", "expand_token_split")
 
 _SINGULAR_LOCATION_FUNCTIONS = {
     "execpath": None,
@@ -248,7 +247,7 @@ def _split_on_output_dir(ctx, state, piece):
     tokens = []
     for i, part in enumerate(piece.split(bin_dir)):
         if i > 0:
-            tokens.append(root_token(_anchor_file(ctx, state)))
+            tokens.append((_anchor_file(ctx, state), "b"))
         if part and ("bazel-out/" in part or "blaze-out/" in part):
             state["unmappable"] = True
         if part:
@@ -288,7 +287,7 @@ def _resolve_var(ctx, extra_vars, state, name):
         if payload in extra_vars:
             value = extra_vars[payload]
         elif payload == "BINDIR" or (payload == "GENDIR" and ctx.genfiles_dir.path == ctx.bin_dir.path):
-            tokens.append(root_token(_anchor_file(ctx, state)))
+            tokens.append((_anchor_file(ctx, state), "b"))
             continue
         elif payload in ctx.var:
             value = ctx.var[payload]
@@ -390,12 +389,29 @@ def _resolve_via_native(ctx, location_map, targets, state, fn, label_string):
         files.append(f)
     return tuple(files)
 
+def _location_token(fn, files, workspace_name):
+    # A plural exec path expansion of a single file renders exactly like the
+    # singular form (sorting and joining are no-ops), so it can use the
+    # cheaper bare-File encoding and the emission strategies enabled by it.
+    if fn == "location" or fn == "execpath" or ((fn == "locations" or fn == "execpaths") and len(files) == 1):
+        return files[0]
+    elif fn == "rootpath":
+        return (files[0], "r")
+    elif fn == "rlocationpath":
+        return (files[0], "R", workspace_name)
+    elif fn == "locations" or fn == "execpaths":
+        return (files, "e")
+    elif fn == "rootpaths":
+        return (files, "r")
+    else:
+        return (files, "R", workspace_name)
+
 def _resolve_location(ctx, explicit, targets, state, fn, label_string):
     location_map = _location_map(ctx, explicit, state)
     label = _resolve_label(ctx, fn, label_string)
     if label == None:
         files = _resolve_via_native(ctx, location_map, targets, state, fn, label_string)
-        return location_token(fn, files, ctx.workspace_name)
+        return _location_token(fn, files, ctx.workspace_name)
     files = location_map.get(label)
     if files == None:
         fail("label '%s' in $(%s) expression is not a declared prerequisite of this rule" %
@@ -406,9 +422,68 @@ def _resolve_location(ctx, explicit, targets, state, fn, label_string):
     if fn in _SINGULAR_LOCATION_FUNCTIONS and len(files) > 1:
         fail("label '%s' in $(location) expression expands to more than one file, please use $(locations %s) instead.  Files (at most 5 shown) are: [%s]" %
              (_format_label(label), _format_label(label), ", ".join(sorted([callable_path(f.path) for f in files])[:5])))
-    return location_token(fn, files, ctx.workspace_name)
+    return _location_token(fn, files, ctx.workspace_name)
+
+def _add_single(args, val):
+    """Emits a single dynamic value as one argument with the cheapest encoding."""
+    if type(val) == "File":
+        if val.is_directory:
+            # args.add rejects directories, but a singleton add_all with
+            # expand_directories = False stringifies them identically.
+            args.add_all([val], expand_directories = False)
+            return
+        if "/" in val.path:
+            # Default File stringification is the raw exec path, which
+            # matches location expansion except for paths without a "/",
+            # which get a "./" prefix there.
+            args.add(val)
+            return
+    args.add_all([val], map_each = expand_token, expand_directories = False)
+
+def _all_external(files):
+    for f in files:
+        if not f.short_path.startswith("../"):
+            return False
+    return True
+
+def _strip(val):
+    # Composite sites are rendered with knowledge of the site's location
+    # function recovered by the re-parse, so mode tags are dropped: rootpath
+    # sites store a bare File, plural exec/rootpath sites a bare tuple of
+    # Files. Anchor pairs are kept, since their site is a make variable
+    # reference that cannot be re-resolved purely.
+    if type(val) != "tuple":
+        return val
+    if len(val) == 2 and val[1] == "r":
+        return val[0]
+    if len(val) == 2 and val[1] == "e":
+        return val[0]
+    if len(val) == 3 and val[1] == "R":
+        # The workspace name is only consulted when rendering the rlocation
+        # path of a file in the main repository, so it need not be stored
+        # when it is the Bzlmod default (the renderer substitutes the
+        # constant) or when the files are all external (runfiles paths
+        # starting with "../" never use it). Singleton plurals strip all the
+        # way to a File so that bare files tuples are always distinguishable
+        # from the tagged forms.
+        head = val[0]
+        if type(head) == "File":
+            if val[2] == MAIN_WORKSPACE or head.short_path.startswith("../"):
+                return head
+            return val
+        if val[2] == MAIN_WORKSPACE or _all_external(head):
+            return head if len(head) > 1 else head[0]
+    return val
 
 def _expand(ctx, explicit, targets, extra_vars, state, args, input, split):
+    """Expands input and adds the result to args with the cheapest encoding.
+
+    Emission strategies, from cheapest to most general (see docs/memory.md):
+    static content is expanded eagerly into interned strings, a single
+    dynamic value spanning the whole argument is emitted directly, and
+    everything else becomes one composite token (input, val0, ...) that the
+    rendering callback expands by re-parsing the input.
+    """
     if "bazel-out/" in input or "blaze-out/" in input:
         # A literal output-directory-like path cannot be path mapped.
         state["unmappable"] = True
@@ -423,21 +498,55 @@ def _expand(ctx, explicit, targets, extra_vars, state, args, input, split):
                 args.add(chunk)
         return
 
-    items = []
-    for kind, start, end, payload in parse(input):
+    parsed = parse(input)
+    site_vals = []
+    static = True
+    for kind, _, _, payload in parsed:
         if kind == LIT:
-            items.append(("lit", start, end))
-        elif kind == VAR:
-            items.append(("site", start, end, _resolve_var(ctx, extra_vars, state, payload)))
+            continue
+        if kind == VAR:
+            vals = _resolve_var(ctx, extra_vars, state, payload)
         else:
-            items.append((
-                "site",
-                start,
-                end,
-                [_resolve_location(ctx, explicit, targets, state, payload[0], payload[1])],
-            ))
+            vals = [_resolve_location(ctx, explicit, targets, state, payload[0], payload[1])]
+        for val in vals:
+            # Make variable values are stored as bare (eagerly unescaped)
+            # strings; everything else is dynamic.
+            if type(val) != "string":
+                static = False
+        site_vals.append(vals)
 
-    emit(args, input, items, split)
+    if static:
+        pieces = []
+        next_site = 0
+        for kind, start, end, _ in parsed:
+            if kind == LIT:
+                lit = input[start:end]
+                pieces.append(lit.replace("$$", "$") if "$" in lit else lit)
+            else:
+                # Value strings are already unescaped and render verbatim.
+                pieces.extend(site_vals[next_site])
+                next_site += 1
+
+        # A single piece is added directly to reuse the existing string
+        # instance where possible; args.add interns the result either way.
+        text = pieces[0] if len(pieces) == 1 else "".join(pieces)
+        if not split:
+            args.add(text)
+        else:
+            for chunk in text.split(" "):
+                if chunk:
+                    args.add(chunk)
+    elif not split and len(parsed) == 1 and len(site_vals[0]) == 1:
+        # The whole argument is a single dynamic value; emitted in its
+        # tagged form, which renders without re-parsing.
+        _add_single(args, site_vals[0][0])
+    else:
+        vals = [_strip(sv[0]) if len(sv) == 1 else tuple(sv) for sv in site_vals]
+        args.add_all(
+            [tuple([input] + vals)],
+            map_each = expand_token_split if split else expand_token,
+            expand_directories = False,
+        )
 
 def _expander_init(ctx, targets = [], extra_vars = {}):
     """Creates an expander for the given rule context.
