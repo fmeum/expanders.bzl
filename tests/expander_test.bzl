@@ -29,18 +29,25 @@ def _do_expand_impl(ctx):
 
     targets = ctx.attr.srcs + ctx.attr.data
 
+    extra_vars = {}
+    if ctx.attr.use_genrule_vars:
+        extra_vars = expanders.genrule_vars(ctx, outs = ctx.outputs.outs, inputs = ctx.files.srcs)
+    extra_vars.update(ctx.attr.extra_vars)
+
     # An extra variable whose value embeds the output directory path, like
     # toolchain-provided variables pointing at generated tools do.
-    extra_vars = dict(ctx.attr.extra_vars)
     extra_vars["TEST_BINDIR_TOOL"] = ctx.bin_dir.path + "/injected/tool"
 
     expander = expanders.make(ctx, targets = targets, extra_vars = extra_vars)
 
     if ctx.attr.with_expected:
-        expanded = [
-            ctx.expand_make_variables("expand", ctx.expand_location(input, targets), extra_vars)
-            for input in ctx.attr.expand
-        ]
+        expanded = []
+        for input in ctx.attr.expand:
+            native = ctx.expand_make_variables("expand", ctx.expand_location(input, targets), extra_vars)
+            if ctx.attr.split:
+                expanded.extend([chunk for chunk in native.split(" ") if chunk])
+            else:
+                expanded.append(native)
     else:
         expanded = []
 
@@ -50,7 +57,11 @@ def _do_expand_impl(ctx):
 
         args = ctx.actions.args().set_param_file_format("multiline")
         for input in ctx.attr.expand:
-            expander.expand(args, input)
+            expander.expand(args, input, split = ctx.attr.split)
+        if ctx.attr.expect_supports_path_mapping:
+            actual = "yes" if expander.supports_path_mapping() else "no"
+            if actual != ctx.attr.expect_supports_path_mapping:
+                fail("supports_path_mapping() was unexpectedly %s" % actual)
         actual = ctx.actions.declare_file("%s.actual%s" % (ctx.label.name, suffix))
         write_kwargs = {"execution_requirements": {"supports-path-mapping": "1"}} if mapped else {}
         ctx.actions.write(output = actual, content = args, **write_kwargs)
@@ -77,6 +88,9 @@ _do_expand = rule(
         "tools": attr.label_list(allow_files = True),
         "outs": attr.output_list(),
         "extra_vars": attr.string_dict(),
+        "use_genrule_vars": attr.bool(),
+        "split": attr.bool(),
+        "expect_supports_path_mapping": attr.string(),
         "with_expected": attr.bool(default = True),
     },
 )
@@ -89,7 +103,18 @@ def _output_group(name, impl, group, **kwargs):
         **kwargs
     )
 
-def expander_test(name, expand, srcs = [], data = [], tools = [], outs = [], extra_vars = {}, **kwargs):
+def expander_test(
+        name,
+        expand,
+        srcs = [],
+        data = [],
+        tools = [],
+        outs = [],
+        extra_vars = {},
+        use_genrule_vars = False,
+        split = False,
+        expect_supports_path_mapping = "",
+        **kwargs):
     """Diffs expanders.bzl output against native expansion, with and without path mapping."""
     _do_expand(
         name = name + "_impl",
@@ -99,6 +124,9 @@ def expander_test(name, expand, srcs = [], data = [], tools = [], outs = [], ext
         tools = tools,
         outs = outs,
         extra_vars = extra_vars,
+        use_genrule_vars = use_genrule_vars,
+        split = split,
+        expect_supports_path_mapping = expect_supports_path_mapping,
         **kwargs
     )
 
@@ -132,7 +160,7 @@ _failure_test = analysistest.make(
     attrs = {"msg": attr.string()},
 )
 
-def expander_failure_test(name, expand, msg, srcs = [], data = [], extra_vars = {}, **kwargs):
+def expander_failure_test(name, expand, msg, srcs = [], data = [], extra_vars = {}, split = False, **kwargs):
     """Asserts that expanding the given string fails with a native-style error message."""
     _do_expand(
         name = name + "_impl",
@@ -140,6 +168,7 @@ def expander_failure_test(name, expand, msg, srcs = [], data = [], extra_vars = 
         srcs = srcs,
         data = data,
         extra_vars = extra_vars,
+        split = split,
         with_expected = False,
         tags = ["manual"],
         **kwargs

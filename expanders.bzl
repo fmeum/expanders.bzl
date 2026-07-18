@@ -235,14 +235,22 @@ def _split_on_output_dir(ctx, state, piece):
     output directory (e.g. paths to generated tools). Replacing each
     occurrence with the lazily evaluated root path of the anchor file keeps
     such values byte-identical while making them subject to path mapping.
+
+    Any output-directory-like path that remains afterwards (e.g. a tool path
+    under another configuration's output directory) cannot be mapped and is
+    recorded in state for supports_path_mapping().
     """
     bin_dir = ctx.bin_dir.path
     if bin_dir not in piece:
+        if "bazel-out/" in piece or "blaze-out/" in piece:
+            state["unmappable"] = True
         return [piece]
     tokens = []
     for i, part in enumerate(piece.split(bin_dir)):
         if i > 0:
             tokens.append(root_token(_anchor_file(ctx, state)))
+        if part and ("bazel-out/" in part or "blaze-out/" in part):
+            state["unmappable"] = True
         if part:
             tokens.append(part)
     return tokens
@@ -298,13 +306,13 @@ def _resolve_var(ctx, extra_vars, state, name):
             tokens.extend(_split_on_output_dir(ctx, state, value))
             continue
         items = []
-        for kind, piece in parse(value):
+        for kind, start, end, payload in parse(value):
             if kind == LIT:
-                items.append((-1, piece))
+                items.append((-1, value[start:end]))
             elif kind == VAR:
-                items.append((depth + 1, piece))
+                items.append((depth + 1, payload))
             else:
-                items.append((-2, piece[0]))
+                items.append((-2, payload[0]))
         stack.extend(reversed(items))
     fail("unreachable")
 
@@ -394,22 +402,36 @@ def _resolve_location(ctx, explicit, targets, state, fn, label_string):
              (_format_label(label), _format_label(label), ", ".join(sorted([callable_path(f.path) for f in files])[:5])))
     return location_token(fn, files, ctx.workspace_name)
 
-def _expand(ctx, explicit, targets, extra_vars, state, args, input):
+def _expand(ctx, explicit, targets, extra_vars, state, args, input, split):
+    if "bazel-out/" in input or "blaze-out/" in input:
+        # A literal output-directory-like path cannot be path mapped.
+        state["unmappable"] = True
     if "$" not in input:
-        # Fast path: the Args object retains only the attribute value itself.
-        args.add(input)
+        if not split:
+            # Fast path: the Args object retains only the attribute value
+            # itself.
+            args.add(input)
+            return
+        for chunk in input.split(" "):
+            if chunk:
+                args.add(chunk)
         return
 
-    tokens = []
-    for kind, payload in parse(input):
+    items = []
+    for kind, start, end, payload in parse(input):
         if kind == LIT:
-            tokens.append(payload)
+            items.append(("lit", start, end))
         elif kind == VAR:
-            tokens.extend(_resolve_var(ctx, extra_vars, state, payload))
+            items.append(("site", start, end, _resolve_var(ctx, extra_vars, state, payload)))
         else:
-            tokens.append(_resolve_location(ctx, explicit, targets, state, payload[0], payload[1]))
+            items.append((
+                "site",
+                start,
+                end,
+                [_resolve_location(ctx, explicit, targets, state, payload[0], payload[1])],
+            ))
 
-    emit(args, tokens)
+    emit(args, input, items, split)
 
 def _expander_init(ctx, targets = [], extra_vars = {}):
     """Creates an expander for the given rule context.
@@ -442,9 +464,49 @@ def _expander_init(ctx, targets = [], extra_vars = {}):
         explicit[label] = _expansion_files(target)
     state = {}
     return struct(
-        expand = lambda args, input: _expand(ctx, explicit, targets, extra_vars, state, args, input),
+        expand = lambda args, input, split = False: _expand(ctx, explicit, targets, extra_vars, state, args, input, split),
+        supports_path_mapping = lambda: not state.get("unmappable", False),
     )
+
+def _genrule_vars(ctx, outs = [], inputs = []):
+    """Returns extra_vars with genrule-style make variables.
+
+    Provides $@ / $(@) (only with exactly one out), $(<) (only with exactly
+    one input), $(@D) and $(RULEDIR), following genrule's semantics (and
+    bazel-lib's expand_variables). The values embed the output directory
+    path and thus become subject to path mapping via the output directory
+    splitting performed on make variable values.
+
+    Referencing $@ with multiple outs or $(<) with multiple inputs fails
+    with "$(@) not defined" / "$(<) not defined", since the variables are
+    only defined when unambiguous.
+
+    Args:
+        ctx: The rule context.
+        outs: The list of output Files backing $@ and $(@D).
+        inputs: The list of input Files backing $(<).
+
+    Returns:
+        A dict to pass (possibly after overlaying additional variables) as
+        the extra_vars parameter of expanders.make.
+    """
+    parts = [ctx.bin_dir.path]
+    if ctx.label.workspace_root:
+        parts.append(ctx.label.workspace_root)
+    if ctx.label.package:
+        parts.append(ctx.label.package)
+    rule_dir = "/".join(parts)
+    vars = {"RULEDIR": rule_dir}
+    if len(outs) == 1:
+        vars["@"] = outs[0].path
+        vars["@D"] = outs[0].path if outs[0].is_directory else outs[0].dirname
+    else:
+        vars["@D"] = rule_dir
+    if len(inputs) == 1:
+        vars["<"] = inputs[0].path
+    return vars
 
 expanders = struct(
     make = _expander_init,
+    genrule_vars = _genrule_vars,
 )

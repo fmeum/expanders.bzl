@@ -156,6 +156,7 @@ expander_test(
         "--tool=$(TEST_BINDIR_TOOL)",
         "$(TEST_BINDIR_TOOL)/sub",
     ],
+    expect_supports_path_mapping = "yes",
     extra_vars = {
         "A": "x$(B)y",
         "B": "$(TARGET_CPU)",
@@ -177,6 +178,78 @@ expander_test(
         "V9": "done",
         "BINTOOLS": "$(BINDIR)/tools",
     },
+)
+
+# split = True breaks arguments at spaces in literals and make variable
+# values and fans plural location expansions out into one argument per file,
+# matching a whitespace split of the eagerly expanded string.
+
+expander_test(
+    name = "split_mode",
+    srcs = [
+        "src.txt",
+        ":gen.txt",
+    ],
+    data = [":mixed_group"],
+    expand = [
+        "run --fast $(execpath :gen.txt)",
+        "$(execpaths :mixed_group)",
+        "$(rootpaths :mixed_group)",
+        "$(rlocationpaths :mixed_group)",
+        "--opt=$(execpath :gen.txt) trailing",
+        "a  b   c",
+        "  leading trailing  ",
+        "$(SPACEY) end",
+        "x$(SPACEY)y",
+        "$(TARGET_CPU) $(COMPILATION_MODE)",
+        "$(BINDIR)/x $(execpath src.txt)",
+        "",
+    ],
+    extra_vars = {"SPACEY": "one two three"},
+    split = True,
+)
+
+expander_failure_test(
+    name = "fail_split_embedded_plural",
+    data = [":mixed_group"],
+    expand = "--x=$(execpaths :mixed_group)",
+    msg = "a plural location expansion cannot be combined with other content",
+    split = True,
+)
+
+# expanders.genrule_vars provides $@, $(@D), $(RULEDIR) and $(<) with
+# genrule semantics; their values embed the output directory and are thus
+# path mapped.
+
+expander_test(
+    name = "genrule_vars",
+    srcs = ["src.txt"],
+    outs = ["gv_out.txt"],
+    expand = [
+        "$@",
+        "$(@)",
+        "$(@D)",
+        "$(RULEDIR)",
+        "$(<)",
+        "--out=$@ --in=$(<)",
+    ],
+    expect_supports_path_mapping = "yes",
+    use_genrule_vars = True,
+)
+
+# supports_path_mapping() turns False when a raw output-directory-like path
+# that cannot be anchored survives into the expansion, e.g. a tool path from
+# another configuration's output directory.
+
+expander_test(
+    name = "unmappable_var",
+    expand = [
+        "$(FOREIGN)",
+        "--x=$(FOREIGN)",
+        "literal bazel-out/something",
+    ],
+    expect_supports_path_mapping = "no",
+    extra_vars = {"FOREIGN": "bazel-out/k8-opt-exec-ST-abc/bin/tool"},
 )
 
 # Location functions, singular.

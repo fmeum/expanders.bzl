@@ -63,6 +63,25 @@ most one expander per rule context (it can be used with any number of `Args`
 objects): expanding `$(BINDIR)` or `$(GENDIR)` declares a helper file with a
 fixed name.
 
+Additional API:
+
+* `expander.expand(args, input, split = True)` emits one argument per
+  space-separated chunk of the expanded string, like tokenizing the eager
+  expansion: chunk boundaries come from spaces in literals and make variable
+  values, and a plural location expansion that forms an argument on its own
+  fans out into one argument per file (still lazily). A plural expansion
+  mixed with other content in one chunk is an error.
+* `expanders.genrule_vars(ctx, outs = [], inputs = [])` returns an
+  `extra_vars` dict providing `$@`, `$(@D)`, `$(RULEDIR)` and `$(<)` with
+  genrule semantics; since their values embed the output directory, they are
+  automatically path mapped.
+* `expander.supports_path_mapping()` reports whether everything expanded so
+  far is compatible with path mapping; it turns `False` when a raw
+  output-directory-like path that cannot be lazily mapped survives into an
+  argument (e.g. a make variable value pointing into another configuration's
+  output directory). Use it to gate the `supports-path-mapping` execution
+  requirement of the consuming action.
+
 ### Path mapping
 
 Because paths are computed lazily, they automatically respect path mapping.

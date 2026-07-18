@@ -77,6 +77,7 @@ So the per-call overhead of this library's emission strategies is:
 | 2-tuple | `RegularTuple` 16 B + `Object[2]` 24 B | **40 B** |
 | 3-tuple | `RegularTuple` 16 B + `Object[3]` 24 B (12 B base + 12 B, padded) | **40 B** |
 | `File`, depset, `ctx.var` value, tag literal | shared, retained elsewhere | **0 B** |
+| Starlark `int` in [-128, 99,872) | `StarlarkInt.of` returns cached singletons (`smallints[100_000]`) | **0 B** |
 
 Tuples are the optimal token container available to Starlark code. The
 immutable list variants match them exactly (`ImmutableSingletonStarlarkList`
@@ -107,7 +108,8 @@ whole-string `$(VAR)` arguments are interned via `args.add` regardless.)
 | token | encoding | marginal retained bytes |
 |---|---|---|
 | whole input without `$` | the attr string itself | 4 (slot) |
-| literal substring, L chars | fresh string (vector path — **not interned**) | 4 + ~36 + L |
+| composite argument (span) | `(input, chunk_start, chunk_end, s0, e0, val0, ...)` — references the attribute string, offsets are cached ints | 4 + tuple (16 + 4·(3 + 3k), padded) + value costs; **no literal text retained** |
+| static text spliced into a span (spacey make-var value pieces) | fresh string | ~36 + L |
 | `$(VAR)` | `SingletonTuple` around shared value | 4 + 16 |
 | `$(BINDIR)` / `$(GENDIR)` | `(anchor_file, "b")` pair | 4 + 40, plus one-time anchor (§5) |
 | `$(execpath)`/`$(location)` singular | bare `File` | 4 |
@@ -230,8 +232,8 @@ content):
 |---|---|---|
 | plain literal (no `$`) | (36 + L)/k | 4 |
 | `"$(execpath :own_output)"` (unique content) | ≈ 96 | **4** (plain `args.add(file)`) |
-| `"--flag=$(execpath :own_output)"` | ≈ 104 | ≈ 60 (`format =`: 3 slots + format string) |
-| `"--tool=$(execpath //shared:tool)"` | ≈ 104/k → ~0 | ≈ 60 |
+| `"--flag=$(execpath :own_output)"` | ≈ 104 | ≈ 68 (span: 3 slots + one tuple, constant in literal length) |
+| `"--tool=$(execpath //shared:tool)"` | ≈ 104/k → ~0 | ≈ 68 |
 | `"$(TARGET_CPU)"`, `"a $(VAR) b"` | ≈ (36 + L)/k → ~0 | 28–170 |
 | `"$(execpaths :group)"`, n = 20 | ≈ 1,160 | ≈ 56 (+ 112 shared once) |
 | `"$(BINDIR)"` | ≈ 80/k → ~0 | 44 + anchor once |
@@ -250,30 +252,29 @@ token encoding across the board — see §7.
    single-pass `$$`/error semantics stay in the parser. A special case falls
    out for free: a whole-string `$(VAR)` becomes `args.add(<shared value>)` —
    4 bytes, zero copies.
-2. **Use `args.add(file[, format = ...])` when exactly one token is a
-   singular exec path.** `Args` keeps the `File` and formats its exec path
-   lazily (`SingleFormattedArg`), so this is path mapping aware while
-   retaining just 1 slot (whole-string case) or 3 slots plus one format
-   string with the static tokens folded in (`%` escaped as `%%`) — no
-   tuples, no `VectorArg` machinery, and at most one fresh string even when
-   the file has both a prefix and a suffix. Directories, which `Args.add`
-   rejects, use a singleton `args.add_all(..., expand_directories = False)`
-   instead: 2 slots for a whole-string expansion (no `map_each` means no
-   location slot either), or 3 slots plus a `format_each` string for
-   composites. Singleton *plural* exec expansions are downgraded to the
-   bare-`File` encoding first, since sorting and joining one path are
-   no-ops. One caveat keeps some arguments on the generic path: default
-   `File` stringification is the raw exec path, which differs from location
-   expansion's `./` prefix for paths without a `/` (root-package source
-   files). The dynamically built format string is retained per action —
-   unlike typical `.bzl`-literal format strings, which are shared per call
-   site, and unlike `Args.add`'s scalar string values, which are interned;
-   it still never exceeds the literal substrings it replaces (§8.2).
-3. **Keep the generic lazy token path for everything else** — plurals,
-   `rootpath`/`rlocationpath`, `$(BINDIR)`/`$(GENDIR)` and make variable
-   values embedding the output directory (which expand to anchor-root
-   tokens so that they path-map), tree artifacts, and arguments with more
-   than one dynamic token.
+2. **Emit single dynamic values directly.** A whole-argument exec path is
+   `args.add(file)` (1 slot; directories use a singleton
+   `args.add_all(expand_directories = False)`, 2 slots, since `args.add`
+   rejects them); any other single value is a singleton `add_all` with
+   `map_each` (3 slots). Only files whose path contains no `/` (root-package
+   source files, whose native rendering has a `./` prefix) skip the plain
+   `add` form.
+3. **Render everything else from a span.** Composite arguments become a
+   single tuple `(input, chunk_start, chunk_end, s, e, val, ...)`
+   referencing the original attribute string; literal text is sliced out of
+   it at rendering time and `$$` unescaped then, so no substrings and no
+   format strings are retained at all — offsets are cached `StarlarkInt`
+   singletons. This subsumed an earlier `format =`-based strategy: a span is
+   constant-size in the literal length, needs no `%%` escaping and handles
+   directories and `./`-prefix files without eligibility checks. The one
+   trade-off: for *computed* (non-attribute) inputs the span retains the
+   full input including the location macro text; for attribute strings that
+   text is already retained by the package.
+
+With `split = True`, arguments additionally break at spaces in literals and
+make variable values (both analysis-known), and plural location expansions
+that form an argument on their own fan out lazily into one argument per
+file, ordered by unmapped rendered path.
 
 All strategies evaluate the same token-rendering function, so their output
 is identical by construction.
