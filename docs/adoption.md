@@ -54,11 +54,11 @@ raw output path flows into an argument.)
   become `extra_vars` whose values embed `ctx.bin_dir.path` — the output-dir
   splitting makes them path-mapped automatically, which their current eager
   strings never were.
-* The one semantic caveat: `split_args` tokenizes the *expanded* string.
-  Addition A1 reproduces this lazily (split literals at analysis time, fan
-  out plural expansions one argument per file), which is byte-identical
-  whenever no individual path contains whitespace — the same caveat native
-  plural expansion has anyway.
+* `split_args` tokenizes the *expanded* string; `split = True` reproduces
+  exactly that (the rendering callback splits the lazily expanded string and
+  returns a list, which `Args` fans out into multiple arguments), so there
+  is no semantic caveat beyond quoting: `split_args` respects shell quotes,
+  the split here is plain spaces.
 
 ## 2. rules_rust `rustc_flags`
 
@@ -158,10 +158,10 @@ mechanical; the provider schema changes from strings to token lists.
 ## Proposed additions
 
 * **A1 — implemented** as `expander.expand(args, input, split = True)`:
-  literal segments and (analysis-known) make variable values split eagerly;
-  plural location expansions fan out lazily, one argument per file (sorted,
-  matching native order). Reproduces the pervasive `split_args(expand(...))`
-  / `.split(" ")` pattern except when a single path contains whitespace.
+  static arguments split eagerly into interned chunks; dynamic arguments
+  render lazily and split in the callback, fanning out into multiple
+  arguments — byte-identical to `.split(" ")` of the eager expansion,
+  embedded plurals included.
 * **A2 — token API for deferred emission**: `expander.tokens(input) ->
   opaque` plus `expanders.emit(args, tokens)` (and `emit_split`). Tokens are
   provider-safe plain values, so expansion can happen where the attribute

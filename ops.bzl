@@ -1,3 +1,5 @@
+load(":parse.bzl", "LIT", "parse")
+
 visibility("private")
 
 # Args token encoding, chosen to minimize retained analysis-phase memory. A
@@ -9,26 +11,21 @@ visibility("private")
 #   (File, "R", ws_name)     rlocation path of a single file ($(rlocationpath))
 #   (File, "b")              root path of a file ($(BINDIR), $(GENDIR))
 #   ((File, ...), tag[, ws]) plural variants, space-joined and sorted
-#   span (see below)         a composite argument rendered from the original
-#                            input string
+#   (input, val0, val1, ...) a composite argument: the original input string
+#                            followed by one value per expansion site
 #
-# A span token references the original (attribute) string instead of
-# retaining substrings of it:
+# A composite token retains nothing but the original (attribute) string and
+# the resolved values: rendering re-parses the input with the exact same
+# parse() that resolved it during analysis (a pure function of the string),
+# takes the literal segments from the scan (unescaping "$$") and substitutes
+# the retained values for the variable and location sites in order. A site
+# that resolved to multiple values (e.g. a make variable value split around
+# the output directory) stores them grouped as (tuple(values),) - a 1-tuple
+# holding a tuple, which is unambiguous since verbatim value tokens are
+# 1-tuples holding strings. Composite tokens have length >= 2 and a string
+# head, which no other token shape has.
 #
-#   (input, chunk_start, chunk_end, s0, e0, val0, s1, e1, val1, ...)
-#
-# It renders input[chunk_start:chunk_end] with each [s_i, e_i) range replaced
-# by the rendering of val_i (one of the simple tokens above) and "$$"
-# unescaped in the literal segments in between. Sites are in ascending order
-# and may be empty (s_i == e_i) to splice in values without consuming input,
-# e.g. the pieces of a make variable value split around the output directory.
-# Retained memory: the input string is shared with the rule's attribute,
-# Starlark ints below 100,000 are cached singletons, so a span costs its
-# tuple plus any non-File values - independent of the length of the literal
-# text. Spans have length >= 6 and a string head, which no other token shape
-# has.
-#
-# All paths are computed inside the map_each callback below, which Bazel
+# All paths are computed inside the map_each callbacks below, which Bazel
 # evaluates when the action's command line is expanded. File.path,
 # File.short_path and File.root.path are therefore never materialized during
 # analysis and, under --experimental_output_paths=strip, automatically
@@ -39,22 +36,36 @@ def expand_token(token):
     token_type = type(token)
     if token_type != "tuple":
         return _render_value(token)
-    if len(token) >= 6 and type(token[0]) == "string":
-        input = token[0]
-        parts = []
-        previous_end = token[1]
-        num_sites = (len(token) - 3) // 3
-        for i in range(num_sites):
-            lit = input[previous_end:token[3 + 3 * i]]
-            if lit:
-                parts.append(lit.replace("$$", "$") if "$" in lit else lit)
-            parts.append(_render_value(token[5 + 3 * i]))
-            previous_end = token[4 + 3 * i]
-        lit = input[previous_end:token[2]]
-        if lit:
-            parts.append(lit.replace("$$", "$") if "$" in lit else lit)
-        return "".join(parts)
+    if len(token) >= 2 and type(token[0]) == "string":
+        return _render_composite(token)
     return _render_value(token)
+
+def expand_token_split(token):
+    """map_each callback rendering a composite token into one string per space-separated chunk.
+
+    Returning a list makes Args emit multiple arguments for a single token,
+    which matches splitting the eagerly expanded string exactly - including
+    plural expansions embedded in larger arguments.
+    """
+    return [chunk for chunk in _render_composite(token).split(" ") if chunk]
+
+def _render_composite(token):
+    input = token[0]
+    parts = []
+    next_val = 1
+    for kind, start, end, _ in parse(input):
+        if kind == LIT:
+            lit = input[start:end]
+            parts.append(lit.replace("$$", "$") if "$" in lit else lit)
+            continue
+        val = token[next_val]
+        next_val += 1
+        if type(val) == "tuple" and len(val) == 1 and type(val[0]) == "tuple":
+            for grouped in val[0]:
+                parts.append(_render_value(grouped))
+        else:
+            parts.append(_render_value(val))
+    return "".join(parts)
 
 def _render_value(token):
     token_type = type(token)

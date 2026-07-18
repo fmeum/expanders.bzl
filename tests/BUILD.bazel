@@ -203,17 +203,12 @@ expander_test(
         "x$(SPACEY)y",
         "$(TARGET_CPU) $(COMPILATION_MODE)",
         "$(BINDIR)/x $(execpath src.txt)",
+        # A plural expansion embedded in a larger argument splits exactly
+        # like the eagerly expanded string does.
+        "--x=$(execpaths :mixed_group)",
         "",
     ],
     extra_vars = {"SPACEY": "one two three"},
-    split = True,
-)
-
-expander_failure_test(
-    name = "fail_split_embedded_plural",
-    data = [":mixed_group"],
-    expand = "--x=$(execpaths :mixed_group)",
-    msg = "a plural location expansion cannot be combined with other content",
     split = True,
 )
 

@@ -66,11 +66,10 @@ fixed name.
 Additional API:
 
 * `expander.expand(args, input, split = True)` emits one argument per
-  space-separated chunk of the expanded string, like tokenizing the eager
-  expansion: chunk boundaries come from spaces in literals and make variable
-  values, and a plural location expansion that forms an argument on its own
-  fans out into one argument per file (still lazily). A plural expansion
-  mixed with other content in one chunk is an error.
+  space-separated chunk of the expanded string, byte-identical to splitting
+  the eagerly expanded string — including plural location expansions, which
+  fan out into one argument per file (still lazily, via a rendering callback
+  that returns a list of strings).
 * `expanders.genrule_vars(ctx, outs = [], inputs = [])` returns an
   `extra_vars` dict providing `$@`, `$(@D)`, `$(RULEDIR)` and `$(<)` with
   genrule semantics; since their values embed the output directory, they are

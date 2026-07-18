@@ -108,8 +108,8 @@ whole-string `$(VAR)` arguments are interned via `args.add` regardless.)
 | token | encoding | marginal retained bytes |
 |---|---|---|
 | whole input without `$` | the attr string itself | 4 (slot) |
-| composite argument (span) | `(input, chunk_start, chunk_end, s0, e0, val0, ...)` — references the attribute string, offsets are cached ints | 4 + tuple (16 + 4·(3 + 3k), padded) + value costs; **no literal text retained** |
-| static text spliced into a span (spacey make-var value pieces) | fresh string | ~36 + L |
+| composite argument | `(input, val0, ..., valk-1)` — the attribute string plus one value per site; sites are recovered by re-running `parse()` at render time | 4 + tuple (16 + 4·(1 + k), padded) + value costs; **no literal text and no offsets retained** |
+| literal pieces of make variable *values* (retained per use) | fresh strings | ~36 + L |
 | `$(VAR)` | `SingletonTuple` around shared value | 4 + 16 |
 | `$(BINDIR)` / `$(GENDIR)` | `(anchor_file, "b")` pair | 4 + 40, plus one-time anchor (§5) |
 | `$(execpath)`/`$(location)` singular | bare `File` | 4 |
@@ -232,8 +232,8 @@ content):
 |---|---|---|
 | plain literal (no `$`) | (36 + L)/k | 4 |
 | `"$(execpath :own_output)"` (unique content) | ≈ 96 | **4** (plain `args.add(file)`) |
-| `"--flag=$(execpath :own_output)"` | ≈ 104 | ≈ 68 (span: 3 slots + one tuple, constant in literal length) |
-| `"--tool=$(execpath //shared:tool)"` | ≈ 104/k → ~0 | ≈ 68 |
+| `"--flag=$(execpath :own_output)"` | ≈ 104 | ≈ 52 (composite: 3 slots + a 2-tuple, constant in literal length) |
+| `"--tool=$(execpath //shared:tool)"` | ≈ 104/k → ~0 | ≈ 52 |
 | `"$(TARGET_CPU)"`, `"a $(VAR) b"` | ≈ (36 + L)/k → ~0 | 28–170 |
 | `"$(execpaths :group)"`, n = 20 | ≈ 1,160 | ≈ 56 (+ 112 shared once) |
 | `"$(BINDIR)"` | ≈ 80/k → ~0 | 44 + anchor once |
@@ -259,25 +259,26 @@ token encoding across the board — see §7.
    `map_each` (3 slots). Only files whose path contains no `/` (root-package
    source files, whose native rendering has a `./` prefix) skip the plain
    `add` form.
-3. **Render everything else from a span.** Composite arguments become a
-   single tuple `(input, chunk_start, chunk_end, s, e, val, ...)`
-   referencing the original attribute string; literal text is sliced out of
-   it at rendering time and `$$` unescaped then, so no substrings and no
-   format strings are retained at all — offsets are cached `StarlarkInt`
-   singletons. This subsumed an earlier `format =`-based strategy: a span is
-   constant-size in the literal length, needs no `%%` escaping and handles
-   directories and `./`-prefix files without eligibility checks. The one
-   trade-off: for *computed* (non-attribute) inputs the span retains the
-   full input including the location macro text; for attribute strings that
-   text is already retained by the package.
+3. **Render everything else by re-parsing the input.** Composite arguments
+   become a single tuple `(input, val0, ..., valk-1)`: the rendering
+   callback re-runs the very same `parse()` on the input string (a pure
+   function of it), takes literal segments from the scan (unescaping `$$`
+   then) and substitutes the retained values for the sites in order. Neither
+   literal text nor offsets are retained; a site that resolved to several
+   values stores them as a nested tuple group. This subsumed two earlier
+   strategies — `format =` strings (fresh string per action, `%%` escaping)
+   and offset-carrying span tuples — at the cost of running the O(n) parse
+   during fingerprinting and execution, alongside the `map_each` evaluation
+   that already happens then. Trade-off unchanged from spans: for *computed*
+   (non-attribute) inputs the token retains the full input including the
+   macro text; for attribute strings that text is already retained by the
+   package.
 
-With `split = True`, arguments additionally break at spaces in literals and
-make variable values (both analysis-known), and plural location expansions
-that form an argument on their own fan out lazily into one argument per
-file, ordered by unmapped rendered path.
-
-All strategies evaluate the same token-rendering function, so their output
-is identical by construction.
+With `split = True`, static arguments split eagerly into interned chunks,
+and dynamic arguments use a rendering callback that returns one string per
+space-separated chunk of the expanded string — Args fans a returned list out
+into multiple arguments — which is byte-identical to splitting the eagerly
+expanded string, including plural expansions embedded in larger arguments.
 
 Behavioral details of native expansion discovered during this analysis
 (the implicit location map of `ctx.expand_location`, executable preference,
