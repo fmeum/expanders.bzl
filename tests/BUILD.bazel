@@ -150,6 +150,9 @@ expander_test(
         "$(A)",
         "p $(A) s",
         "<$(E)>",
+        # A value containing literal "$$" after unescaping must not be
+        # unescaped twice.
+        "<$(E2)>",
         "$(C) $(PATH)",
         "$(V0)",
         "$(BINTOOLS)",
@@ -161,6 +164,7 @@ expander_test(
         "A": "x$(B)y",
         "B": "$(TARGET_CPU)",
         "E": "a$$b",
+        "E2": "x$$$$y",
         "C": "$@",
         "@": "at",
         # A value that is exactly the variable's name is not recursed into.
@@ -312,6 +316,9 @@ expander_test(
         "$(rlocationpath //pkg:gen.txt)",
         "$(rlocationpath @bazel_lib//lib:diff_test.bzl)",
         "--opt=$(rlocationpath :gen.txt) $(rlocationpath src.txt)",
+        # Composite singleton-plural rlocation sites strip to a bare File.
+        "x $(rlocationpaths :gen.txt)",
+        "--opt=$(rlocationpaths @bazel_lib//lib:diff_test.bzl) y",
     ],
 )
 

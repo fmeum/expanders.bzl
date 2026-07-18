@@ -54,7 +54,7 @@ the actual target. Passing the same label twice in targets is an error.
 """
 
 load(":cost_model.bzl", "emit")
-load(":ops.bzl", "callable_path", "location_token", "root_token", "var_token")
+load(":ops.bzl", "callable_path", "location_token", "root_token")
 load(":parse.bzl", "LIT", "LOC", "VAR", "parse")
 
 _SINGULAR_LOCATION_FUNCTIONS = {
@@ -297,8 +297,9 @@ def _resolve_var(ctx, extra_vars, state, name):
 
         if value == payload:
             # Native expansion appends such values verbatim, without
-            # recursing (and thus without unescaping "$$").
-            tokens.append(var_token(value))
+            # recursing (and thus without unescaping "$$"). Composite value
+            # strings render verbatim, so the value can be stored as-is.
+            tokens.append(value)
             continue
         if depth > 10:
             fail("potentially unbounded recursion during expansion of '%s'" % value)
@@ -306,13 +307,18 @@ def _resolve_var(ctx, extra_vars, state, name):
             tokens.extend(_split_on_output_dir(ctx, state, value))
             continue
         items = []
-        for kind, start, end, payload in parse(value):
+        for kind, start, end, piece_payload in parse(value):
             if kind == LIT:
-                items.append((-1, value[start:end]))
+                # Value pieces are fresh strings either way, so "$$" is
+                # unescaped eagerly; composite value strings then render
+                # verbatim (re-unescaping would corrupt values containing
+                # literal "$$").
+                piece = value[start:end]
+                items.append((-1, piece.replace("$$", "$") if "$$" in piece else piece))
             elif kind == VAR:
-                items.append((depth + 1, payload))
+                items.append((depth + 1, piece_payload))
             else:
-                items.append((-2, payload[0]))
+                items.append((-2, piece_payload[0]))
         stack.extend(reversed(items))
     fail("unreachable")
 

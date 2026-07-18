@@ -1,4 +1,4 @@
-load(":ops.bzl", "expand_token", "expand_token_split")
+load(":ops.bzl", "MAIN_WORKSPACE", "expand_token", "expand_token_split")
 
 visibility("private")
 
@@ -34,8 +34,9 @@ visibility("private")
 #      arguments.
 
 def _is_static(val):
-    val_type = type(val)
-    return val_type == "string" or (val_type == "tuple" and len(val) == 1)
+    # Make variable values are stored as bare (eagerly unescaped) strings;
+    # everything else is dynamic.
+    return type(val) == "string"
 
 def _add_single(args, val):
     """Emits a single dynamic value as one argument with the cheapest encoding."""
@@ -56,22 +57,54 @@ def _add_single(args, val):
 def _unescape(s):
     return s.replace("$$", "$") if "$" in s else s
 
+def _strip(val):
+    # Composite sites are rendered with knowledge of the site's location
+    # function recovered by the re-parse, so mode tags are dropped: rootpath
+    # sites store a bare File, plural exec/rootpath sites a bare tuple of
+    # Files. rlocation values keep their tagged form (the workspace name is
+    # data), as do anchor pairs (whose site is a make variable reference
+    # that cannot be re-resolved purely).
+    if type(val) != "tuple":
+        return val
+    if len(val) == 2 and val[1] == "r":
+        return val[0]
+    if len(val) == 2 and val[1] == "e":
+        return val[0]
+    if len(val) == 3 and val[1] == "R":
+        # The workspace name is only consulted when rendering the rlocation
+        # path of a file in the main repository, so it need not be stored
+        # when it is the Bzlmod default (the renderer substitutes the
+        # constant) or when the files are all external (runfiles paths
+        # starting with "../" never use it). Singleton plurals strip all the
+        # way to a File so that bare files tuples are always distinguishable
+        # from the tagged forms.
+        head = val[0]
+        if type(head) == "File":
+            if val[2] == MAIN_WORKSPACE or head.short_path.startswith("../"):
+                return head
+            return val
+        if val[2] == MAIN_WORKSPACE or _all_external(head):
+            return head if len(head) > 1 else head[0]
+    return val
+
+def _all_external(files):
+    for f in files:
+        if not f.short_path.startswith("../"):
+            return False
+    return True
+
 def emit(args, input, items, split):
     """Adds the expansion of input, resolved into items, to args.
 
     items is a list of ("lit", start, end) and ("site", start, end, vals)
     entries in input order, where vals are simple ops.bzl tokens.
     """
-    vals = []
+    site_items = [item for item in items if item[0] == "site"]
     static = True
-    for item in items:
-        if item[0] != "site":
-            continue
+    for item in site_items:
         for val in item[3]:
             if not _is_static(val):
                 static = False
-        site_vals = item[3]
-        vals.append(site_vals[0] if len(site_vals) == 1 else (tuple(site_vals),))
 
     if static:
         pieces = []
@@ -79,8 +112,8 @@ def emit(args, input, items, split):
             if item[0] == "lit":
                 pieces.append(_unescape(input[item[1]:item[2]]))
             else:
-                for val in item[3]:
-                    pieces.append(expand_token(val))
+                # Value strings are already unescaped and render verbatim.
+                pieces.extend(item[3])
 
         # A single piece is added directly to reuse the existing string
         # instance where possible; args.add interns the result either way.
@@ -91,11 +124,15 @@ def emit(args, input, items, split):
             for chunk in text.split(" "):
                 if chunk:
                     args.add(chunk)
-    elif not split and len(items) == 1 and (type(vals[0]) != "tuple" or len(vals[0]) > 1):
-        # The whole argument is a single dynamic value (a lone site with one
-        # value; groups are 1-tuples and take the composite path).
-        _add_single(args, vals[0])
+    elif not split and len(items) == 1 and len(site_items[0][3]) == 1:
+        # The whole argument is a single dynamic value; emitted in its
+        # tagged form, which renders without re-parsing.
+        _add_single(args, site_items[0][3][0])
     else:
+        vals = []
+        for item in site_items:
+            site_vals = item[3]
+            vals.append(_strip(site_vals[0]) if len(site_vals) == 1 else tuple(site_vals))
         args.add_all(
             [tuple([input] + vals)],
             map_each = expand_token_split if split else expand_token,

@@ -110,12 +110,12 @@ whole-string `$(VAR)` arguments are interned via `args.add` regardless.)
 | whole input without `$` | the attr string itself | 4 (slot) |
 | composite argument | `(input, val0, ..., valk-1)` — the attribute string plus one value per site; sites are recovered by re-running `parse()` at render time | 4 + tuple (16 + 4·(1 + k), padded) + value costs; **no literal text and no offsets retained** |
 | literal pieces of make variable *values* (retained per use) | fresh strings | ~36 + L |
-| `$(VAR)` | `SingletonTuple` around shared value | 4 + 16 |
-| `$(BINDIR)` / `$(GENDIR)` | `(anchor_file, "b")` pair | 4 + 40, plus one-time anchor (§5) |
-| `$(execpath)`/`$(location)` singular | bare `File` | 4 |
-| `$(rootpath)` singular | pair | 4 + 40 |
-| `$(rlocationpath)` singular | triple (`ws` string shared) | 4 + 40 |
-| plural, n files | wrapper pair/triple + files tuple | 4 + 40 + (28 + 4n, padded) for the files tuple, shared across all tokens referencing the same target via the location map |
+| `$(VAR)` site in a composite | bare shared value string (value pieces containing `$$` are unescaped eagerly and thus fresh) | 4 |
+| `$(BINDIR)` / `$(GENDIR)` | `(anchor_file, "b")` pair (kept: a make variable site cannot be re-resolved purely) | 4 + 40, plus one-time anchor (§5) |
+| `$(execpath)`/`$(location)`/`$(rootpath)` site in a composite | bare `File` — the re-parse recovers the function | 4 |
+| plural exec/rootpath site in a composite | bare files tuple | 4 + (28 + 4n, padded), shared across all tokens referencing the same target via the location map |
+| `$(rlocationpath)`/`$(rlocationpaths)` site in a composite | bare `File`/files tuple when the workspace name is `_main` (the renderer substitutes a constant) or the files are all external (`../` runfiles paths never consult it); tagged triple only for main-repo files under a non-default workspace name | 4, or 4 + 40 in the rare tagged case |
+| whole-argument `$(rootpath)` / plural (tagged, rendered without re-parsing) | pair around File/files tuple | 4 + 40 |
 
 No token ever embeds an exec path: paths come from `File.path`,
 `File.short_path`, `File.root.path` inside the `map_each` callback, which

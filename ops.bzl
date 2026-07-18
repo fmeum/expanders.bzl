@@ -1,11 +1,10 @@
-load(":parse.bzl", "LIT", "parse")
+load(":parse.bzl", "LIT", "VAR", "parse")
 
 visibility("private")
 
 # Args token encoding, chosen to minimize retained analysis-phase memory. A
 # token is one of:
 #   "..."                    literal text, "$$" unescaped lazily
-#   ("...",)                 verbatim string (e.g. a make variable value)
 #   File                     exec path of a single file ($(execpath), $(location))
 #   (File, "r")              runfiles path of a single file ($(rootpath))
 #   (File, "R", ws_name)     rlocation path of a single file ($(rlocationpath))
@@ -18,12 +17,16 @@ visibility("private")
 # the resolved values: rendering re-parses the input with the exact same
 # parse() that resolved it during analysis (a pure function of the string),
 # takes the literal segments from the scan (unescaping "$$") and substitutes
-# the retained values for the variable and location sites in order. A site
-# that resolved to multiple values (e.g. a make variable value split around
-# the output directory) stores them grouped as (tuple(values),) - a 1-tuple
-# holding a tuple, which is unambiguous since verbatim value tokens are
-# 1-tuples holding strings. Composite tokens have length >= 2 and a string
-# head, which no other token shape has.
+# the retained values for the variable and location sites in order. Since
+# the re-parse also recovers each site's location function, site values
+# carry no mode tags: exec and rootpath sites store a bare File, plural
+# sites a bare tuple of Files (only rlocation sites keep their tagged form,
+# as the workspace name is data). Make variable sites store their value as a
+# bare string, appended verbatim ("$$" in values is unescaped eagerly during
+# analysis since value pieces are fresh strings anyway), as an anchor pair
+# (File, "b"), or - when a value resolved to several pieces - as a tuple of
+# such pieces. Composite tokens have length >= 2 and a string head, which no
+# other token shape has.
 #
 # All paths are computed inside the map_each callbacks below, which Bazel
 # evaluates when the action's command line is expanded. File.path,
@@ -53,19 +56,57 @@ def _render_composite(token):
     input = token[0]
     parts = []
     next_val = 1
-    for kind, start, end, _ in parse(input):
+    for kind, start, end, payload in parse(input):
         if kind == LIT:
             lit = input[start:end]
             parts.append(lit.replace("$$", "$") if "$" in lit else lit)
             continue
         val = token[next_val]
         next_val += 1
-        if type(val) == "tuple" and len(val) == 1 and type(val[0]) == "tuple":
-            for grouped in val[0]:
-                parts.append(_render_value(grouped))
+        if kind == VAR:
+            parts.append(_render_var_value(val))
         else:
-            parts.append(_render_value(val))
+            parts.append(_render_location_value(payload[0], val))
     return "".join(parts)
+
+def _render_var_value(val):
+    if type(val) == "string":
+        # Verbatim: "$$" in make variable values is unescaped eagerly.
+        return val
+    if type(val[0]) == "File":
+        # An anchor pair (file, "b") standing in for the output directory.
+        return val[0].root.path
+    parts = []
+    for piece in val:
+        if type(piece) == "string":
+            parts.append(piece)
+        else:
+            parts.append(piece[0].root.path)
+    return "".join(parts)
+
+# The name of the main repository's runfiles directory under Bzlmod. When
+# the rule's workspace name matches (pretty much always), rlocation site
+# values in composites drop their tagged form and the renderer substitutes
+# this constant; other workspace names keep the tagged form carrying the
+# name as data.
+MAIN_WORKSPACE = "_main"
+
+def _render_location_value(fn, val):
+    if fn == "rlocationpath" or fn == "rlocationpaths":
+        if type(val) == "File":
+            return rlocationpath(val, MAIN_WORKSPACE)
+        if val[1] == "R" or type(val[0]) == "tuple":
+            # Tagged forms carrying a non-default workspace name.
+            return _render_value(val)
+
+        # A bare tuple of Files (two or more; singletons strip to a File).
+        return " ".join(sorted([rlocationpath(f, MAIN_WORKSPACE) for f in val]))
+    if type(val) == "File":
+        # Singular sites (and plural expansions of a single file).
+        return callable_path(val.short_path if fn == "rootpath" else val.path)
+    if fn == "rootpaths":
+        return " ".join(sorted([callable_path(f.short_path) for f in val]))
+    return " ".join(sorted([callable_path(f.path) for f in val]))
 
 def _render_value(token):
     token_type = type(token)
@@ -100,9 +141,6 @@ def rlocationpath(file, workspace_name):
     if short_path.startswith("../"):
         return short_path[3:]
     return workspace_name + "/" + short_path
-
-def var_token(value):
-    return (value,)
 
 def root_token(anchor_file):
     return (anchor_file, "b")
