@@ -21,36 +21,25 @@ expander.expand(args, input) behaves like
 
 with the following differences:
 
-  * No expanded strings are retained by the Args object: it only references
-    (substrings of) the original attribute value, File objects and make
-    variable values that are already retained elsewhere. In particular, no
-    string containing an exec path is ever created during analysis. Paths are
-    computed by a map_each callback when the command line is expanded.
-  * Because paths are computed late, they are automatically subject to path
-    mapping (--experimental_output_paths=strip) if the consuming action
-    supports it. This includes $(BINDIR) and $(GENDIR), which are expanded
-    via the root of an anchor file rather than as a constant string, as well
-    as any make variable whose value embeds the output directory path (such
-    as toolchain-provided variables pointing at generated tools).
+  * The Args object retains no expanded strings, only references to the
+    original attribute value, Files and make variable values. Paths are
+    computed by a map_each callback when the command line is expanded and
+    are therefore subject to path mapping
+    (--experimental_output_paths=strip), including $(BINDIR), $(GENDIR) and
+    make variable values that embed the output directory path.
   * "$$" always escapes: "$$(location //foo)" expands to the literal
-    "$(location //foo)" as it does in genrules. The native two-pass
-    composition above instead expands the location reference and keeps the
-    escaped "$".
+    "$(location //foo)" as in genrules, whereas the two-pass composition
+    above expands the location reference.
   * --incompatible_locations_prefers_executable is assumed to be true (its
-    default): a target providing an executable expands to the executable if
-    its default outputs are not exactly one file. Observing the actual flag
-    value would require every rule using this library to declare an implicit
-    attribute (config_setting + select), which is not worth it; setting the
-    flag to false is thus not supported.
+    default); setting it to false is not supported.
 
-Labels in location expressions are resolved exactly like ctx.expand_location
-resolves them (see LocationExpander#buildLocationMap): in addition to the
-explicit targets, the rule's predeclared outputs as well as the prerequisites
-of any of its attributes named "srcs", "deps", "implementation_deps" or
-"tools" (but, perhaps surprisingly, not "data") can be referenced. Targets
-that were depended on via an alias can be referenced by the label of the
-alias and, for the implicitly collected attributes only, also by the label of
-the actual target. Passing the same label twice in targets is an error.
+Labels in location expressions resolve like in ctx.expand_location
+(LocationExpander#buildLocationMap): besides the explicit targets, the
+rule's predeclared outputs and the prerequisites of its attributes named
+"srcs", "deps", "implementation_deps" and "tools" (but not "data") are
+addressable. A target depended on via an alias is referenced by the alias's
+label and, for the implicitly collected attributes only, also by the actual
+target's label. Passing the same label twice in targets is an error.
 """
 
 load(":parse.bzl", "LIT", "VAR", "parse")
@@ -77,26 +66,25 @@ _SINGULAR_LOCATION_FUNCTIONS = {
 }
 
 # Attributes whose prerequisites ctx.expand_location makes addressable in
-# location expressions in addition to the explicitly passed targets, expanding
-# to their executable if they have one and to their files otherwise.
+# addition to the explicit targets, expanding to their executable if they
+# have one and to their files otherwise.
 _IMPLICIT_FILES_TO_RUN_ATTRS = ("deps", "implementation_deps", "tools")
 
 def _fn_name(fn):
-    # Native error messages always refer to $(location)/$(locations), no
-    # matter which location function was actually used.
+    # Native error messages always refer to $(location)/$(locations),
+    # regardless of the location function actually used.
     return "locations" if fn.endswith("s") else "location"
 
 def _format_label(label):
+    # Native error messages render main repository labels without "@@".
     s = str(label)
-
-    # Match the way native error messages render labels in the main repository.
     return s[2:] if s.startswith("@@//") else s
 
 def _alias_label(target):
     """Returns the label of the alias a target was depended on via, if any.
 
-    That label is not exposed to Starlark directly, but can be recovered from
-    the target's string representation, which looks like
+    The label is not exposed to Starlark, but can be recovered from the
+    target's string representation:
     "<alias target //pkg:name of //pkg:actual>".
     """
     s = str(target)
@@ -108,22 +96,20 @@ def _alias_label(target):
     return Label(alias if alias.startswith("@") else "@@" + alias)
 
 def _dependency_label(target):
-    """Returns the label by which a target is referenced in the targets list.
+    """Returns the label matched for an explicitly provided target.
 
-    For a target that is (a chain of) alias(es), target.label refers to the
-    actual target, but native location expansion only matches the label of
-    the alias itself for explicitly provided targets
-    (AliasProvider#getDependencyLabel).
+    Mirrors AliasProvider#getDependencyLabel: the label of the alias the
+    target was depended on via, not target.label (which is the actual
+    target's label).
     """
     alias = _alias_label(target)
     return alias if alias != None else target.label
 
 def _dependency_labels(target):
-    """Returns all labels by which an implicitly collected target is referenced.
+    """Returns the labels matched for an implicitly collected target.
 
-    Mirrors AliasProvider#getDependencyLabels: the label of the first alias
-    and the label of the actual target (intermediate aliases of a chain are
-    not included).
+    Mirrors AliasProvider#getDependencyLabels: the first alias and the
+    actual target's label, omitting intermediate aliases of a chain.
     """
     alias = _alias_label(target)
     if alias != None and alias != target.label:
@@ -139,10 +125,9 @@ def _executable(target):
 def _expansion_files(target):
     """Returns the files an explicitly provided target expands to.
 
-    Mimics --incompatible_locations_prefers_executable=true (the default,
-    which this library assumes unconditionally): a target that provides an
-    executable and whose default outputs are not a single file expands to
-    just the executable.
+    Mirrors makeLabelMap under --incompatible_locations_prefers_executable:
+    a target with an executable expands to it unless its default outputs are
+    a single file.
     """
     files = target.files.to_list()
     if len(files) != 1:
@@ -152,9 +137,8 @@ def _expansion_files(target):
     return files
 
 def _map_add(location_map, label, files):
-    # Values are dicts used as ordered sets: the same label can be
-    # contributed to by both the explicit targets and the implicitly
-    # collected attributes, potentially with different files.
+    # Values are dicts used as sets: explicit targets and implicitly
+    # collected attributes can contribute different files for one label.
     file_set = location_map.get(label)
     if file_set == None:
         file_set = {}
@@ -174,7 +158,7 @@ def _output_label(ctx, file):
 def _collect_outputs(ctx, location_map):
     for attr_name in dir(ctx.outputs):
         # The default executable of an executable rule is not an output file
-        # target and thus not addressable in location expressions.
+        # target and thus not addressable.
         if attr_name == "executable":
             continue
         value = getattr(ctx.outputs, attr_name)
@@ -198,24 +182,18 @@ def _srcs_files(target):
 
 def _files_to_run_files(target):
     # Unlike for explicitly provided targets, the executable is preferred
-    # even if the target's default outputs are a single file.
+    # even if the default outputs are a single file.
     executable = _executable(target)
     return [executable] if executable != None else target.files.to_list()
 
 def _location_map(ctx, explicit, state):
-    """Lazily builds the full label-to-files map of ctx.expand_location.
+    """Lazily builds the label-to-files map of ctx.expand_location.
 
     Mirrors LocationExpander#buildLocationMap with allowDataAttributeEntries
-    set to false and collectSrcs set to true: the map contains the rule's
-    predeclared outputs, the prerequisites of its "srcs" attribute (expanding
-    to their files), the prerequisites of its "deps", "implementation_deps"
-    and "tools" attributes (expanding to their executable, if any, and their
-    files otherwise) and the explicitly provided targets, with files for the
-    same label merged into a set.
-
-    The map only lives during the analysis phase; Args objects retain the
-    per-label files tuples, which reference Files that are retained by the
-    rule's attributes anyway.
+    = false and collectSrcs = true: predeclared outputs, "srcs"
+    prerequisites (their files), "deps"/"implementation_deps"/"tools"
+    prerequisites (their executable or files) and the explicit targets,
+    merged per label.
     """
     location_map = state.get("location_map")
     if location_map == None:
@@ -231,8 +209,8 @@ def _location_map(ctx, explicit, state):
     return location_map
 
 def _anchor_file(ctx, state):
-    # An empty file declared only so that its lazily evaluated (and thus path
-    # mapping aware) root.path can stand in for $(BINDIR).
+    # An empty file declared only so that its lazily evaluated root.path and
+    # dirname can stand in for $(BINDIR) and $(RULEDIR).
     anchor = state.get("anchor")
     if anchor == None:
         anchor = ctx.actions.declare_file(ctx.label.name + ".expanders.bzl.anchor")
@@ -241,16 +219,12 @@ def _anchor_file(ctx, state):
     return anchor
 
 def _split_on_output_dir(ctx, state, piece):
-    """Splits a literal piece on occurrences of the output bin directory path.
+    """Splits a value piece on occurrences of the output directory path.
 
-    Make variable values provided by toolchains can embed paths under the
-    output directory (e.g. paths to generated tools). Replacing each
-    occurrence with the lazily evaluated root path of the anchor file keeps
-    such values byte-identical while making them subject to path mapping.
-
-    Any output-directory-like path that remains afterwards (e.g. a tool path
-    under another configuration's output directory) cannot be mapped and is
-    recorded in state for supports_path_mapping().
+    Each occurrence is replaced by the anchor file's lazily evaluated root
+    path, making values that embed the output directory subject to path
+    mapping. Output-directory-like paths that remain (e.g. under another
+    configuration's output directory) are recorded as unmappable.
     """
     bin_dir = ctx.bin_dir.path
     if bin_dir not in piece:
@@ -270,18 +244,17 @@ def _split_on_output_dir(ctx, state, piece):
 def _resolve_var(ctx, extra_vars, state, name):
     """Returns the expansion tokens for a make variable reference.
 
-    Mirrors TemplateExpander: make variable values are recursively expanded
-    (Make ":=" semantics), except when a value is exactly the name of its
-    variable. The recursion depth check applies to every recursively reached
-    value, even one without any "$", just like in native expansion.
+    Mirrors TemplateExpander: values are recursively expanded (Make ":="
+    semantics) except when a value is exactly its variable's name, and the
+    depth limit of 10 applies to every recursively reached value, even one
+    without a "$".
 
-    Starlark forbids recursive functions, so the recursion over nested
-    values is driven by an explicit stack of (depth, payload) items: a
-    positive depth marks a variable reference in a value expanded at that
-    depth, -1 a literal piece of a value and -2 a location function in a
-    value, which native expansion does not support. Items are pushed in
-    reverse so that they are processed (and errors are reported) in the
-    left-to-right order of native expansion.
+    Starlark forbids recursive functions, so the recursion runs on an
+    explicit stack of (depth, payload) items: a positive depth is a variable
+    reference in a value expanded at that depth, -1 a literal value piece
+    and -2 a location function in a value (not supported by native
+    expansion). Items are pushed in reverse so that processing and errors
+    follow native left-to-right order.
     """
     tokens = []
     stack = [(1, name)]
@@ -295,19 +268,16 @@ def _resolve_var(ctx, extra_vars, state, name):
         if depth == -2:
             fail("$(%s) not defined" % payload)
 
-        # Extra variables take precedence over ctx.var, just like the
+        # Extra variables take precedence over ctx.var, like the
         # additional_substitutions parameter of ctx.expand_make_variables.
         if payload in extra_vars:
             value = extra_vars[payload]
             value_type = type(value)
             if value_type != "string":
-                # File-valued variables render as the file's exec path,
-                # lazily and thus path mapped. Source files are retained as
-                # Files too: their path strings are already structurally
-                # interned via the artifact, and expanding them eagerly
-                # would only copy them into the global string interning
-                # table via args.add. The remaining forms are produced by
-                # genrule_vars.
+                # Files are retained as-is, including source files: their
+                # path strings are already interned structurally via the
+                # artifact and would only pollute the global string
+                # interning table if expanded eagerly through args.add.
                 if value_type == "File":
                     tokens.append(value)
                 elif value == _RULEDIR:
@@ -326,9 +296,8 @@ def _resolve_var(ctx, extra_vars, state, name):
             fail("$(%s) not defined" % payload)
 
         if value == payload:
-            # Native expansion appends such values verbatim, without
-            # recursing (and thus without unescaping "$$"). Composite value
-            # strings render verbatim, so the value can be stored as-is.
+            # Appended verbatim without recursing or unescaping "$$", like
+            # in native expansion.
             tokens.append(value)
             continue
         if depth > 10:
@@ -339,10 +308,8 @@ def _resolve_var(ctx, extra_vars, state, name):
         items = []
         for kind, start, end, piece_payload in parse(value):
             if kind == LIT:
-                # Value pieces are fresh strings either way, so "$$" is
-                # unescaped eagerly; composite value strings then render
-                # verbatim (re-unescaping would corrupt values containing
-                # literal "$$").
+                # "$$" is unescaped eagerly: value strings render verbatim,
+                # and unescaping again would corrupt literal "$$".
                 piece = value[start:end]
                 items.append((-1, piece.replace("$$", "$") if "$$" in piece else piece))
             elif kind == VAR:
@@ -355,16 +322,15 @@ def _resolve_var(ctx, extra_vars, state, name):
 def _resolve_label(ctx, fn, label_string):
     """Resolves a label string like native location expansion does.
 
-    Returns None for labels with an apparent repository name: resolving those
-    requires the repo mapping of the rule's repository, which is not exposed
-    to Starlark (both Label() and the deprecated Label.relative() use the
-    repo mapping of the .bzl file containing the call, which would be this
-    file's).
+    Returns None for labels with an apparent repository name: those require
+    the repo mapping of the rule's repository, which is not exposed to
+    Starlark (Label() and Label.relative() use the repo mapping of the .bzl
+    file containing the call, i.e. this file's).
     """
     if not label_string:
         fail("invalid label in $(%s) expression: invalid target name '': empty target name" % _fn_name(fn))
     if label_string.startswith("@@"):
-        # Canonical labels are resolved independently of any repo mapping.
+        # Canonical labels resolve independently of any repo mapping.
         return Label(label_string)
     if label_string.startswith("@"):
         return None
@@ -373,9 +339,6 @@ def _resolve_label(ctx, fn, label_string):
     return ctx.label.same_package_label(label_string.removeprefix(":"))
 
 def _lazy_path_map(location_map, state, key, to_path):
-    # Maps the given kind of path to the corresponding File, for use by
-    # _resolve_via_native. Only built on demand and never retained beyond the
-    # analysis phase.
     path_map = state.get(key)
     if path_map == None:
         path_map = {}
@@ -386,12 +349,12 @@ def _lazy_path_map(location_map, state, key, to_path):
     return path_map
 
 def _resolve_via_native(ctx, location_map, targets, state, fn, label_string):
-    """Resolves a location expression with native ctx.expand_location.
+    """Resolves a location expression via native ctx.expand_location.
 
-    Used for labels with apparent repository names. The natively expanded
-    paths are mapped back to File objects, so all strings created here are
-    garbage collected when analysis completes; the Args object never retains
-    them. Native label resolution and error reporting apply faithfully.
+    Used for labels with apparent repository names: the natively expanded
+    paths are mapped back to Files, so native label resolution and error
+    reporting apply and all strings created here are garbage collected when
+    analysis completes.
     """
     expanded = ctx.expand_location("$(%s %s)" % (fn, label_string), targets)
     if fn == "rootpath" or fn == "rootpaths":
@@ -421,9 +384,9 @@ def _resolve_via_native(ctx, location_map, targets, state, fn, label_string):
     return tuple(files)
 
 def _location_token(fn, files, workspace_name):
-    # A plural exec path expansion of a single file renders exactly like the
-    # singular form (sorting and joining are no-ops), so it can use the
-    # cheaper bare-File encoding and the emission strategies enabled by it.
+    # A plural expansion of a single file renders like the singular form
+    # (sorting and joining are no-ops), so exec path singletons use the
+    # cheaper bare-File encoding.
     if fn == "location" or fn == "execpath" or ((fn == "locations" or fn == "execpaths") and len(files) == 1):
         return files[0]
     elif fn == "rootpath":
@@ -456,14 +419,10 @@ def _resolve_location(ctx, explicit, targets, state, fn, label_string):
     return _location_token(fn, files, ctx.workspace_name)
 
 def _add_single(args, val):
-    """Emits a single dynamic value as one argument with the cheapest encoding.
-
-    Whole-argument values are emitted as a bare File or files tuple with a
-    render callback matching their mode, which retains no tag tuple at all.
-    """
+    """Emits a single whole-argument value with the cheapest encoding."""
     if type(val) == "File":
         if val.is_directory:
-            # args.add rejects directories, but a singleton add_all with
+            # args.add rejects directories; a singleton add_all with
             # expand_directories = False stringifies them identically.
             args.add_all([val], expand_directories = False)
             return
@@ -488,8 +447,8 @@ def _add_single(args, val):
     else:
         stripped = _strip(val)
         if stripped == val:
-            # A main-repository rlocation under a non-default workspace name
-            # keeps its tagged form carrying the name.
+            # An rlocation that needs its workspace name keeps the tagged
+            # form.
             args.add_all([val], map_each = expand_token, expand_directories = False)
             return
         head = stripped
@@ -503,11 +462,17 @@ def _all_external(files):
     return True
 
 def _strip(val):
-    # Composite sites are rendered with knowledge of the site's location
-    # function recovered by the re-parse, so mode tags are dropped: rootpath
-    # sites store a bare File, plural exec/rootpath sites a bare tuple of
-    # Files. Anchor pairs are kept, since their site is a make variable
-    # reference that cannot be re-resolved purely.
+    """Drops token parts that composite rendering recovers from the re-parse.
+
+    Location values lose their mode tags. rlocation values also lose the
+    workspace name when rendering never consults it: for the Bzlmod default
+    (the renderer substitutes MAIN_WORKSPACE) and for external files (their
+    runfiles paths start with "../"). Singleton plurals strip all the way to
+    a File so that bare files tuples always have at least two elements and
+    stay distinguishable from the tagged forms. Anchor and dirname pairs are
+    kept: their site is a make variable reference, which cannot be
+    re-resolved purely.
+    """
     if type(val) != "tuple":
         return val
     if len(val) == 2 and val[1] == "rootpath":
@@ -515,13 +480,6 @@ def _strip(val):
     if len(val) == 2 and val[1] == "execpaths":
         return val[0]
     if len(val) == 3 and val[1] == "rlocationpath":
-        # The workspace name is only consulted when rendering the rlocation
-        # path of a file in the main repository, so it need not be stored
-        # when it is the Bzlmod default (the renderer substitutes the
-        # constant) or when the files are all external (runfiles paths
-        # starting with "../" never use it). Singleton plurals strip all the
-        # way to a File so that bare files tuples are always distinguishable
-        # from the tagged forms.
         head = val[0]
         if type(head) == "File":
             if val[2] == MAIN_WORKSPACE or head.short_path.startswith("../"):
@@ -532,21 +490,18 @@ def _strip(val):
     return val
 
 def _expand(ctx, explicit, targets, extra_vars, state, args, input, split):
-    """Expands input and adds the result to args with the cheapest encoding.
+    """Expands input and adds the result to args.
 
     Emission strategies, from cheapest to most general (see docs/memory.md):
-    static content is expanded eagerly into interned strings, a single
-    dynamic value spanning the whole argument is emitted directly, and
-    everything else becomes one composite token (input, val0, ...) that the
-    rendering callback expands by re-parsing the input.
+    static content expands eagerly into interned strings, a single value
+    spanning the whole argument is emitted directly, and everything else
+    becomes one composite token rendered by re-parsing the input.
     """
     if "bazel-out/" in input or "blaze-out/" in input:
         # A literal output-directory-like path cannot be path mapped.
         state["unmappable"] = True
     if "$" not in input:
         if not split:
-            # Fast path: the Args object retains only the attribute value
-            # itself.
             args.add(input)
             return
         for chunk in input.split(" "):
@@ -565,8 +520,6 @@ def _expand(ctx, explicit, targets, extra_vars, state, args, input, split):
         else:
             vals = [_resolve_location(ctx, explicit, targets, state, payload[0], payload[1])]
         for val in vals:
-            # Make variable values are stored as bare (eagerly unescaped)
-            # strings; everything else is dynamic.
             if type(val) != "string":
                 static = False
         site_vals.append(vals)
@@ -579,12 +532,11 @@ def _expand(ctx, explicit, targets, extra_vars, state, args, input, split):
                 lit = input[start:end]
                 pieces.append(lit.replace("$$", "$") if "$" in lit else lit)
             else:
-                # Value strings are already unescaped and render verbatim.
                 pieces.extend(site_vals[next_site])
                 next_site += 1
 
         # A single piece is added directly to reuse the existing string
-        # instance where possible; args.add interns the result either way.
+        # instance; args.add interns the result either way.
         text = pieces[0] if len(pieces) == 1 else "".join(pieces)
         if not split:
             args.add(text)
@@ -595,14 +547,11 @@ def _expand(ctx, explicit, targets, extra_vars, state, args, input, split):
     elif not split and len(parsed) == 1 and len(site_vals[0]) == 1:
         val = site_vals[0][0]
         if parsed[0][0] == VAR and type(val) == "File" and "/" not in val.path:
-            # A File-valued variable renders as the raw exec path, which is
-            # exactly default File stringification - unlike location
-            # expansion, which would add a "./" prefix to a path without a
-            # "/" (_add_single's fallback would render it that way).
+            # File-valued variables render as the raw exec path, which is
+            # exactly default File stringification; _add_single would render
+            # a path without a "/" with location expansion's "./" prefix.
             args.add(val)
         else:
-            # The whole argument is a single dynamic value; emitted in its
-            # tagged form, which renders without re-parsing.
             _add_single(args, val)
     else:
         vals = [_strip(sv[0]) if len(sv) == 1 else tuple(["group"] + sv) for sv in site_vals]
@@ -615,25 +564,31 @@ def _expand(ctx, explicit, targets, extra_vars, state, args, input, split):
 def _expander_init(ctx, targets = [], extra_vars = {}):
     """Creates an expander for the given rule context.
 
+    Create at most one expander per rule context (it can be used with any
+    number of Args objects): expanding $(BINDIR), $(GENDIR) or $(RULEDIR)
+    declares a helper file with a fixed name.
+
     Args:
         ctx: The rule context.
-        targets: A list of Targets whose labels can be referenced in location
-            expressions, matching the targets parameter of
-            ctx.expand_location. Just like there, the rule's predeclared
-            outputs and the prerequisites of its "srcs", "deps",
-            "implementation_deps" and "tools" attributes can always be
-            referenced.
+        targets: A list of Targets whose labels can be referenced in
+            location expressions, matching the targets parameter of
+            ctx.expand_location.
         extra_vars: A dict of additional make variables, matching the
             additional_substitutions parameter of ctx.expand_make_variables.
+            Values may also be Files, which expand to their exec path,
+            rendered lazily.
 
     Returns:
-        A struct with an expand(args, input) method that expands make
-        variables and location expressions in input and adds the result to
-        the Args object args as a single argument.
-
-    Create at most one expander per rule context (it can be used with any
-    number of Args objects): expanding $(BINDIR) or $(GENDIR) declares a
-    helper file with a fixed name.
+        A struct with methods:
+            expand(args, input, split = False): expands make variables and
+                location expressions in input and adds the result to the
+                Args object args, as a single argument or, with split =
+                True, as one argument per space-separated chunk of the
+                expanded string.
+            supports_path_mapping(): returns whether all expansions so far
+                are compatible with path mapping; use it to gate the
+                "supports-path-mapping" execution requirement of the
+                consuming action.
     """
     explicit = {}
     for target in targets:
@@ -647,22 +602,19 @@ def _expander_init(ctx, targets = [], extra_vars = {}):
         supports_path_mapping = lambda: not state.get("unmappable", False),
     )
 
-# Sentinel for the rule's output directory: resolved to the parent directory
+# Sentinel for the rule's output directory, resolved to the parent directory
 # of the anchor file, which always lives at the package's root in the output
-# tree, so that $(RULEDIR) is rendered lazily and path mapped.
+# tree.
 _RULEDIR = struct(expanders_ruledir = True)
 
 def _genrule_vars(outs = [], inputs = []):
     """Returns extra_vars with genrule-style make variables.
 
     Provides $@ / $(@) (only with exactly one out), $(<) (only with exactly
-    one input), $(@D) and $(RULEDIR), following genrule's semantics (and
-    bazel-lib's expand_variables). The values retain the given Files
-    directly and render lazily, so they are subject to path mapping.
-
+    one input), $(@D) and $(RULEDIR) with genrule semantics. The values
+    retain the given Files and render lazily, so they are path mapped.
     Referencing $@ with multiple outs or $(<) with multiple inputs fails
-    with "$(@) not defined" / "$(<) not defined", since the variables are
-    only defined when unambiguous.
+    with "$(@) not defined" / "$(<) not defined".
 
     Args:
         outs: The list of output Files backing $@ and $(@D).

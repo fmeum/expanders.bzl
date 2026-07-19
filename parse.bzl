@@ -1,8 +1,6 @@
 visibility("private")
 
-# Token kinds produced by parse(). All tokens carry [start, end) offsets into
-# the input so that no substrings need to be created or retained; consumers
-# slice the input on demand.
+# Token kinds produced by parse().
 LIT = 0  # a literal segment, potentially containing "$$" escapes
 VAR = 1  # a make variable reference; payload: the name
 LOC = 2  # a location function; payload: a (function name, label string) tuple
@@ -22,12 +20,11 @@ LOCATION_FUNCTIONS = {
 def parse(input):
     """Tokenizes a string with make variable and location references.
 
-    The result is a list of (kind, start, end, payload) tuples, where
-    [start, end) is the token's extent in input (for VAR and LOC, including
-    the "$(...)" syntax) and payload is None for LIT.
-
-    Fails with errors matching those of the native expansion logic, which is
-    ctx.expand_make_variables applied to the result of ctx.expand_location.
+    Returns a list of (kind, start, end, payload) tuples, where [start, end)
+    is the token's extent in input (for VAR and LOC including the "$(...)"
+    syntax) and payload is None for LIT; consumers slice the input on
+    demand. Fails with the errors of ctx.expand_make_variables applied to
+    the result of ctx.expand_location.
     """
     tokens = []
     lit_start = 0
@@ -44,8 +41,7 @@ def parse(input):
             fail("unterminated $")
         c = input[j + 1]
         if c == "$":
-            # An escaped "$", kept in the literal segment and unescaped only
-            # when the command line is expanded.
+            # An escaped "$", kept in the literal segment.
             i = j + 2
         elif c == "(":
             k = input.find(")", j + 2)

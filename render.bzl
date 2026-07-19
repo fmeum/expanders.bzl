@@ -1,50 +1,45 @@
 """Execution-time rendering of expansion tokens.
 
-Only the map_each callbacks and their helpers live here: the Args objects of
-every rule using this library retain references to these functions, which
-transitively pin their module. Keeping this module free of analysis-time
-machinery keeps that footprint minimal.
+Only the map_each callbacks and their helpers live here: retained Args pin
+this module through the callback references, so it contains no analysis-time
+code.
+
+Token shapes:
+
+    "..."                        literal text; "$$" unescaped at render time
+    File                         singular exec path
+    (File, "rootpath")           singular runfiles path
+    (File, "rlocationpath", ws)  singular rlocation path, non-default ws
+    (File, "root")               root path ($(BINDIR), $(GENDIR))
+    (File, "dirname")            containing directory ($(@D), $(RULEDIR))
+    ((File, ...), tag[, ws])     plural forms, space-joined and sorted
+    (input, val0, val1, ...)     composite argument
+
+A composite token holds the original input string and one value per variable
+or location site. Rendering re-parses the input with the same parse() that
+resolved it during analysis, takes the literal segments from the scan and
+substitutes the values in site order. Since the re-parse recovers each
+site's location function, location values are untagged (a bare File or files
+tuple); only rlocation values for main-repository files under a workspace
+name other than MAIN_WORKSPACE keep the tagged form. Make variable values
+are verbatim strings (unescaped during analysis), Files (rendered as the raw
+exec path), (File, "root"/"dirname") pairs, or a ("group", ...) tuple of
+such pieces. Composite tokens are the only tuples with a string head.
+
+Paths are computed only inside these callbacks, when the command line is
+expanded, and thus reflect the consuming action's path mapper.
 """
 
 load(":parse.bzl", "LIT", "VAR", "parse")
 
 visibility("private")
 
-# Args token encoding, chosen to minimize retained analysis-phase memory. A
-# token is one of:
-#   "..."                    literal text, "$$" unescaped lazily
-#   File                     exec path of a single file ($(execpath), $(location))
-#   (File, "rootpath")       runfiles path of a single file ($(rootpath))
-#   (File, "rlocationpath", ws)  rlocation path of a single file
-#   (File, "root")           root path of a file ($(BINDIR), $(GENDIR))
-#   (File, "dirname")        containing directory of a file ($(@D), $(RULEDIR))
-#   ((File, ...), tag[, ws]) plural variants, space-joined and sorted
-#   (input, val0, val1, ...) a composite argument: the original input string
-#                            followed by one value per expansion site
-#
-# A composite token retains nothing but the original (attribute) string and
-# the resolved values: rendering re-parses the input with the exact same
-# parse() that resolved it during analysis (a pure function of the string),
-# takes the literal segments from the scan (unescaping "$$") and substitutes
-# the retained values for the variable and location sites in order. Since
-# the re-parse also recovers each site's location function, site values
-# carry no mode tags: exec and rootpath sites store a bare File, plural
-# sites a bare tuple of Files (only rlocation sites keep their tagged form,
-# as the workspace name is data). Make variable sites store their value as a
-# bare string, appended verbatim ("$$" in values is unescaped eagerly during
-# analysis since value pieces are fresh strings anyway), as an anchor pair
-# (File, "root"), a dirname pair (File, "dirname"), or - when a value
-# resolved to several pieces - as a ("group", ...) tuple of such pieces. Composite tokens have length >= 2 and a string head, which no
-# other token shape has.
-#
-# All paths are computed inside the map_each callbacks below, which Bazel
-# evaluates when the action's command line is expanded. File.path,
-# File.short_path and File.root.path are therefore never materialized during
-# analysis and, under --experimental_output_paths=strip, automatically
-# reflect the path mapper of the consuming action.
+# The main repository's workspace name under Bzlmod. Tokens only carry a
+# workspace name when it differs.
+MAIN_WORKSPACE = "_main"
 
 def expand_token(token):
-    """map_each callback turning a token into its expansion."""
+    """map_each callback rendering a token as a single argument."""
     token_type = type(token)
     if token_type != "tuple":
         return _render_value(token)
@@ -53,11 +48,10 @@ def expand_token(token):
     return _render_value(token)
 
 def expand_token_split(token):
-    """map_each callback rendering a composite token into one string per space-separated chunk.
+    """map_each callback rendering a composite token as one argument per chunk.
 
-    Returning a list makes Args emit multiple arguments for a single token,
-    which matches splitting the eagerly expanded string exactly - including
-    plural expansions embedded in larger arguments.
+    The returned list makes Args emit multiple arguments, matching a split
+    of the eagerly expanded string.
     """
     return [chunk for chunk in _render_composite(token).split(" ") if chunk]
 
@@ -83,7 +77,6 @@ def _render_var_value(val):
     if val_type == "string" or val_type == "File":
         return _render_var_piece(val)
     if val[0] == "group":
-        # A group of pieces from a value that resolved to several tokens.
         parts = []
         for i in range(1, len(val)):
             parts.append(_render_var_piece(val[i]))
@@ -93,61 +86,43 @@ def _render_var_value(val):
 def _render_var_piece(piece):
     piece_type = type(piece)
     if piece_type == "string":
-        # Verbatim: "$$" in make variable values is unescaped eagerly.
         return piece
     if piece_type == "File":
-        # A File-valued make variable renders as its raw exec path.
         return piece.path
     if piece[1] == "dirname":
-        # The directory containing the file ($(@D), $(RULEDIR)).
         path = piece[0].path
         return path[:path.rfind("/")]
-
-    # An anchor pair (file, "root") standing in for the output directory.
     return piece[0].root.path
-
-# The name of the main repository's runfiles directory under Bzlmod. When
-# the rule's workspace name matches (pretty much always), rlocation site
-# values in composites drop their tagged form and the renderer substitutes
-# this constant; other workspace names keep the tagged form carrying the
-# name as data.
-MAIN_WORKSPACE = "_main"
 
 def _render_location_value(fn, val):
     if fn == "rlocationpath" or fn == "rlocationpaths":
         if type(val) == "File":
             return rlocationpath(val, MAIN_WORKSPACE)
         if val[1] == "rlocationpath" or type(val[0]) == "tuple":
-            # Tagged forms carrying a non-default workspace name.
+            # A tagged value; a bare files tuple has a File at index 1 and
+            # always at least two elements (singletons strip to a File).
             return _render_value(val)
-
-        # A bare tuple of Files (two or more; singletons strip to a File).
         return " ".join(sorted([rlocationpath(f, MAIN_WORKSPACE) for f in val]))
     if type(val) == "File":
-        # Singular sites (and plural expansions of a single file).
         return callable_path(val.short_path if fn == "rootpath" else val.path)
     if fn == "rootpaths":
         return " ".join(sorted([callable_path(f.short_path) for f in val]))
     return " ".join(sorted([callable_path(f.path) for f in val]))
 
 def _render_value(token):
+    """Renders a non-composite token; tagged forms are always rlocations here."""
     token_type = type(token)
     if token_type == "string":
         return token.replace("$$", "$") if "$" in token else token
     if token_type == "File":
         return callable_path(token.path)
-
-    # Only rlocation values for main-repository files under a non-default
-    # workspace name remain tagged: (file, "rlocationpath", ws) or
-    # ((files...), "rlocationpath", ws).
     head = token[0]
     if type(head) == "File":
         return rlocationpath(head, token[2])
     return " ".join(sorted([rlocationpath(f, token[2]) for f in head]))
 
-# Render callbacks for whole-argument tokens: emitting a bare File or files
-# tuple with the matching callback retains no tag tuple at all, and the
-# callbacks are folded into the interned VectorArg for free.
+# map_each callbacks for whole-argument tokens, which are emitted as a bare
+# File or files tuple with the callback selecting the rendering.
 
 def render_root_path(file):
     return file.root.path
@@ -172,9 +147,9 @@ def render_rlocationpaths(files):
     return " ".join(sorted([rlocationpath(f, MAIN_WORKSPACE) for f in files]))
 
 def callable_path(path):
-    # Native location expansion returns PathFragment.getCallablePathString(),
-    # which prepends "./" to paths that do not contain a "/". Plural
-    # expansions sort after this transformation.
+    # Native location expansion returns PathFragment#getCallablePathString,
+    # which prepends "./" to paths without a "/"; plural forms sort after
+    # this transformation.
     return path if "/" in path else "./" + path
 
 def rlocationpath(file, workspace_name):
