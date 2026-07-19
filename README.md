@@ -70,10 +70,12 @@ Additional API:
   the eagerly expanded string — including plural location expansions, which
   fan out into one argument per file (still lazily, via a rendering callback
   that returns a list of strings).
-* `expanders.genrule_vars(ctx, outs = [], inputs = [])` returns an
-  `extra_vars` dict providing `$@`, `$(@D)`, `$(RULEDIR)` and `$(<)` with
-  genrule semantics; since their values embed the output directory, they are
-  automatically path mapped.
+* `expanders.genrule_vars(outs = [], inputs = [])` returns an `extra_vars`
+  dict providing `$@`, `$(@D)`, `$(RULEDIR)` and `$(<)` with genrule
+  semantics. The values retain the given Files directly and render lazily,
+  so they are path mapped. `extra_vars` generally accepts File values in
+  addition to strings: a File-valued variable expands to the file's raw
+  exec path, rendered lazily.
 * `expander.supports_path_mapping()` reports whether everything expanded so
   far is compatible with path mapping; it turns `False` when a raw
   output-directory-like path that cannot be lazily mapped survives into an

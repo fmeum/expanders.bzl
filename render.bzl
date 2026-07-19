@@ -14,9 +14,10 @@ visibility("private")
 # token is one of:
 #   "..."                    literal text, "$$" unescaped lazily
 #   File                     exec path of a single file ($(execpath), $(location))
-#   (File, "r")              runfiles path of a single file ($(rootpath))
-#   (File, "R", ws_name)     rlocation path of a single file ($(rlocationpath))
-#   (File, "b")              root path of a file ($(BINDIR), $(GENDIR))
+#   (File, "rootpath")       runfiles path of a single file ($(rootpath))
+#   (File, "rlocationpath", ws)  rlocation path of a single file
+#   (File, "root")           root path of a file ($(BINDIR), $(GENDIR))
+#   (File, "dirname")        containing directory of a file ($(@D), $(RULEDIR))
 #   ((File, ...), tag[, ws]) plural variants, space-joined and sorted
 #   (input, val0, val1, ...) a composite argument: the original input string
 #                            followed by one value per expansion site
@@ -32,8 +33,8 @@ visibility("private")
 # as the workspace name is data). Make variable sites store their value as a
 # bare string, appended verbatim ("$$" in values is unescaped eagerly during
 # analysis since value pieces are fresh strings anyway), as an anchor pair
-# (File, "b"), or - when a value resolved to several pieces - as a tuple of
-# such pieces. Composite tokens have length >= 2 and a string head, which no
+# (File, "root"), a dirname pair (File, "dirname"), or - when a value
+# resolved to several pieces - as a ("group", ...) tuple of such pieces. Composite tokens have length >= 2 and a string head, which no
 # other token shape has.
 #
 # All paths are computed inside the map_each callbacks below, which Bazel
@@ -78,19 +79,32 @@ def _render_composite(token):
     return "".join(parts)
 
 def _render_var_value(val):
-    if type(val) == "string":
+    val_type = type(val)
+    if val_type == "string" or val_type == "File":
+        return _render_var_piece(val)
+    if val[0] == "group":
+        # A group of pieces from a value that resolved to several tokens.
+        parts = []
+        for i in range(1, len(val)):
+            parts.append(_render_var_piece(val[i]))
+        return "".join(parts)
+    return _render_var_piece(val)
+
+def _render_var_piece(piece):
+    piece_type = type(piece)
+    if piece_type == "string":
         # Verbatim: "$$" in make variable values is unescaped eagerly.
-        return val
-    if type(val[0]) == "File":
-        # An anchor pair (file, "b") standing in for the output directory.
-        return val[0].root.path
-    parts = []
-    for piece in val:
-        if type(piece) == "string":
-            parts.append(piece)
-        else:
-            parts.append(piece[0].root.path)
-    return "".join(parts)
+        return piece
+    if piece_type == "File":
+        # A File-valued make variable renders as its raw exec path.
+        return piece.path
+    if piece[1] == "dirname":
+        # The directory containing the file ($(@D), $(RULEDIR)).
+        path = piece[0].path
+        return path[:path.rfind("/")]
+
+    # An anchor pair (file, "root") standing in for the output directory.
+    return piece[0].root.path
 
 # The name of the main repository's runfiles directory under Bzlmod. When
 # the rule's workspace name matches (pretty much always), rlocation site
@@ -103,7 +117,7 @@ def _render_location_value(fn, val):
     if fn == "rlocationpath" or fn == "rlocationpaths":
         if type(val) == "File":
             return rlocationpath(val, MAIN_WORKSPACE)
-        if val[1] == "R" or type(val[0]) == "tuple":
+        if val[1] == "rlocationpath" or type(val[0]) == "tuple":
             # Tagged forms carrying a non-default workspace name.
             return _render_value(val)
 
@@ -122,21 +136,40 @@ def _render_value(token):
         return token.replace("$$", "$") if "$" in token else token
     if token_type == "File":
         return callable_path(token.path)
+
+    # Only rlocation values for main-repository files under a non-default
+    # workspace name remain tagged: (file, "rlocationpath", ws) or
+    # ((files...), "rlocationpath", ws).
     head = token[0]
-    if len(token) == 1:
-        return head
-    tag = token[1]
     if type(head) == "File":
-        if tag == "r":
-            return callable_path(head.short_path)
-        if tag == "R":
-            return rlocationpath(head, token[2])
-        return head.root.path
-    if tag == "e":
-        return " ".join(sorted([callable_path(f.path) for f in head]))
-    if tag == "r":
-        return " ".join(sorted([callable_path(f.short_path) for f in head]))
+        return rlocationpath(head, token[2])
     return " ".join(sorted([rlocationpath(f, token[2]) for f in head]))
+
+# Render callbacks for whole-argument tokens: emitting a bare File or files
+# tuple with the matching callback retains no tag tuple at all, and the
+# callbacks are folded into the interned VectorArg for free.
+
+def render_root_path(file):
+    return file.root.path
+
+def render_parent_dir(file):
+    path = file.path
+    return path[:path.rfind("/")]
+
+def render_rootpath(file):
+    return callable_path(file.short_path)
+
+def render_rootpaths(files):
+    return " ".join(sorted([callable_path(f.short_path) for f in files]))
+
+def render_execpaths(files):
+    return " ".join(sorted([callable_path(f.path) for f in files]))
+
+def render_rlocationpath(file):
+    return rlocationpath(file, MAIN_WORKSPACE)
+
+def render_rlocationpaths(files):
+    return " ".join(sorted([rlocationpath(f, MAIN_WORKSPACE) for f in files]))
 
 def callable_path(path):
     # Native location expansion returns PathFragment.getCallablePathString(),
@@ -149,6 +182,3 @@ def rlocationpath(file, workspace_name):
     if short_path.startswith("../"):
         return short_path[3:]
     return workspace_name + "/" + short_path
-
-def root_token(anchor_file):
-    return (anchor_file, "b")

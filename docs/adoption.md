@@ -33,7 +33,7 @@ With expanders.bzl:
 expander = expanders.make(
     ctx,
     targets = ctx.attr.tools + ctx.attr.srcs,
-    extra_vars = expanders.genrule_vars(ctx, outs = expansion_outputs, inputs = inputs),
+    extra_vars = expanders.genrule_vars(outs = expansion_outputs, inputs = inputs),
 )
 if chdir:
     args.add("--chdir")
@@ -51,9 +51,8 @@ raw output path flows into an argument.)
   "disable `supports-path-mapping` if expansion changed anything" logic are
   all deleted: every expansion stays lazy and mapped.
 * bazel-lib's genrule-style variables (`$@`, `$(<)`, `$(@D)`, `$(RULEDIR)`)
-  become `extra_vars` whose values embed `ctx.bin_dir.path` — the output-dir
-  splitting makes them path-mapped automatically, which their current eager
-  strings never were.
+  become `extra_vars` that retain the output Files directly and render
+  lazily — path mapped, which their current eager strings never are.
 * `split_args` tokenizes the *expanded* string; `split = True` reproduces
   exactly that (the rendering callback splits the lazily expanded string and
   returns a list, which `Args` fans out into multiple arguments), so there
@@ -171,11 +170,10 @@ mechanical; the provider schema changes from strings to token lists.
 * **A3 — `format_each` on split/fan-out emission**: applied per produced
   argument (`"$${pwd}/%s"`), covering rules_rust's per-path prefixing
   without post-expansion string surgery.
-* **A4 — implemented** as `expanders.genrule_vars(ctx, outs = [], inputs =
-  [])`: `extra_vars` builder for `$@`, `$(<)`, `$(@D)`, `$(RULEDIR)`
-  matching genrule and bazel-lib's `expand_variables`; their
-  bin-dir-embedding values become path-mapped automatically via output-dir
-  splitting. A `supports_path_mapping()` helper was also added for gating
+* **A4 — implemented** as `expanders.genrule_vars(outs = [], inputs = [])`:
+  `extra_vars` builder for `$@`, `$(<)`, `$(@D)`, `$(RULEDIR)` matching
+  genrule and bazel-lib's `expand_variables`; the values retain the Files
+  directly and render lazily and path mapped. A `supports_path_mapping()` helper was also added for gating
   the execution requirement on actions whose expansions may contain
   unmappable raw output paths.
 

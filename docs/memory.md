@@ -111,7 +111,8 @@ whole-string `$(VAR)` arguments are interned via `args.add` regardless.)
 | composite argument | `(input, val0, ..., valk-1)` — the attribute string plus one value per site; sites are recovered by re-running `parse()` at render time | 4 + tuple (16 + 4·(1 + k), padded) + value costs; **no literal text and no offsets retained** |
 | literal pieces of make variable *values* (retained per use) | fresh strings | ~36 + L |
 | `$(VAR)` site in a composite | bare shared value string (value pieces containing `$$` are unescaped eagerly and thus fresh) | 4 |
-| `$(BINDIR)` / `$(GENDIR)` | `(anchor_file, "b")` pair (kept: a make variable site cannot be re-resolved purely) | 4 + 40, plus one-time anchor (§5) |
+| `$(BINDIR)` / `$(GENDIR)` | `(anchor_file, "root")` pair in composites (a make variable site cannot be re-resolved purely); whole arguments use a bare File with a dedicated render callback | 4 + 40 in composites, 4 + 12 slots whole-argument, plus one-time anchor (§5) |
+| File-valued `extra_vars` (e.g. `genrule_vars`) | bare `File` — also for source files, whose path strings are already structurally interned via the artifact and would only pollute the global string interning table if expanded eagerly through `args.add` | 4 |
 | `$(execpath)`/`$(location)`/`$(rootpath)` site in a composite | bare `File` — the re-parse recovers the function | 4 |
 | plural exec/rootpath site in a composite | bare files tuple | 4 + (28 + 4n, padded), shared across all tokens referencing the same target via the location map |
 | `$(rlocationpath)`/`$(rlocationpaths)` site in a composite | bare `File`/files tuple when the workspace name is `_main` (the renderer substitutes a constant) or the files are all external (`../` runfiles paths never consult it); tagged triple only for main-repo files under a non-default workspace name | 4, or 4 + 40 in the rare tagged case |

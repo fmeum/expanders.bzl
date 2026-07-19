@@ -54,7 +54,20 @@ the actual target. Passing the same label twice in targets is an error.
 """
 
 load(":parse.bzl", "LIT", "VAR", "parse")
-load(":render.bzl", "MAIN_WORKSPACE", "callable_path", "expand_token", "expand_token_split")
+load(
+    ":render.bzl",
+    "MAIN_WORKSPACE",
+    "callable_path",
+    "expand_token",
+    "expand_token_split",
+    "render_execpaths",
+    "render_parent_dir",
+    "render_rlocationpath",
+    "render_rlocationpaths",
+    "render_root_path",
+    "render_rootpath",
+    "render_rootpaths",
+)
 
 _SINGULAR_LOCATION_FUNCTIONS = {
     "execpath": None,
@@ -247,7 +260,7 @@ def _split_on_output_dir(ctx, state, piece):
     tokens = []
     for i, part in enumerate(piece.split(bin_dir)):
         if i > 0:
-            tokens.append((_anchor_file(ctx, state), "b"))
+            tokens.append((_anchor_file(ctx, state), "root"))
         if part and ("bazel-out/" in part or "blaze-out/" in part):
             state["unmappable"] = True
         if part:
@@ -286,8 +299,26 @@ def _resolve_var(ctx, extra_vars, state, name):
         # additional_substitutions parameter of ctx.expand_make_variables.
         if payload in extra_vars:
             value = extra_vars[payload]
+            value_type = type(value)
+            if value_type != "string":
+                # File-valued variables render as the file's exec path,
+                # lazily and thus path mapped. Source files are retained as
+                # Files too: their path strings are already structurally
+                # interned via the artifact, and expanding them eagerly
+                # would only copy them into the global string interning
+                # table via args.add. The remaining forms are produced by
+                # genrule_vars.
+                if value_type == "File":
+                    tokens.append(value)
+                elif value == _RULEDIR:
+                    tokens.append((_anchor_file(ctx, state), "dirname"))
+                elif value_type == "tuple" and len(value) == 2 and type(value[0]) == "File" and value[1] == "dirname":
+                    tokens.append(value)
+                else:
+                    fail("the value of extra_vars[\"%s\"] must be a string or a File" % payload)
+                continue
         elif payload == "BINDIR" or (payload == "GENDIR" and ctx.genfiles_dir.path == ctx.bin_dir.path):
-            tokens.append((_anchor_file(ctx, state), "b"))
+            tokens.append((_anchor_file(ctx, state), "root"))
             continue
         elif payload in ctx.var:
             value = ctx.var[payload]
@@ -396,15 +427,15 @@ def _location_token(fn, files, workspace_name):
     if fn == "location" or fn == "execpath" or ((fn == "locations" or fn == "execpaths") and len(files) == 1):
         return files[0]
     elif fn == "rootpath":
-        return (files[0], "r")
+        return (files[0], "rootpath")
     elif fn == "rlocationpath":
-        return (files[0], "R", workspace_name)
+        return (files[0], "rlocationpath", workspace_name)
     elif fn == "locations" or fn == "execpaths":
-        return (files, "e")
+        return (files, "execpaths")
     elif fn == "rootpaths":
-        return (files, "r")
+        return (files, "rootpath")
     else:
-        return (files, "R", workspace_name)
+        return (files, "rlocationpath", workspace_name)
 
 def _resolve_location(ctx, explicit, targets, state, fn, label_string):
     location_map = _location_map(ctx, explicit, state)
@@ -425,7 +456,11 @@ def _resolve_location(ctx, explicit, targets, state, fn, label_string):
     return _location_token(fn, files, ctx.workspace_name)
 
 def _add_single(args, val):
-    """Emits a single dynamic value as one argument with the cheapest encoding."""
+    """Emits a single dynamic value as one argument with the cheapest encoding.
+
+    Whole-argument values are emitted as a bare File or files tuple with a
+    render callback matching their mode, which retains no tag tuple at all.
+    """
     if type(val) == "File":
         if val.is_directory:
             # args.add rejects directories, but a singleton add_all with
@@ -438,7 +473,28 @@ def _add_single(args, val):
             # which get a "./" prefix there.
             args.add(val)
             return
-    args.add_all([val], map_each = expand_token, expand_directories = False)
+        args.add_all([val], map_each = expand_token, expand_directories = False)
+        return
+    head = val[0]
+    tag = val[1]
+    if tag == "root":
+        map_each = render_root_path
+    elif tag == "dirname":
+        map_each = render_parent_dir
+    elif tag == "rootpath":
+        map_each = render_rootpath if type(head) == "File" else render_rootpaths
+    elif tag == "execpaths":
+        map_each = render_execpaths
+    else:
+        stripped = _strip(val)
+        if stripped == val:
+            # A main-repository rlocation under a non-default workspace name
+            # keeps its tagged form carrying the name.
+            args.add_all([val], map_each = expand_token, expand_directories = False)
+            return
+        head = stripped
+        map_each = render_rlocationpath if type(head) == "File" else render_rlocationpaths
+    args.add_all([head], map_each = map_each, expand_directories = False)
 
 def _all_external(files):
     for f in files:
@@ -454,11 +510,11 @@ def _strip(val):
     # reference that cannot be re-resolved purely.
     if type(val) != "tuple":
         return val
-    if len(val) == 2 and val[1] == "r":
+    if len(val) == 2 and val[1] == "rootpath":
         return val[0]
-    if len(val) == 2 and val[1] == "e":
+    if len(val) == 2 and val[1] == "execpaths":
         return val[0]
-    if len(val) == 3 and val[1] == "R":
+    if len(val) == 3 and val[1] == "rlocationpath":
         # The workspace name is only consulted when rendering the rlocation
         # path of a file in the main repository, so it need not be stored
         # when it is the Bzlmod default (the renderer substitutes the
@@ -537,11 +593,19 @@ def _expand(ctx, explicit, targets, extra_vars, state, args, input, split):
                 if chunk:
                     args.add(chunk)
     elif not split and len(parsed) == 1 and len(site_vals[0]) == 1:
-        # The whole argument is a single dynamic value; emitted in its
-        # tagged form, which renders without re-parsing.
-        _add_single(args, site_vals[0][0])
+        val = site_vals[0][0]
+        if parsed[0][0] == VAR and type(val) == "File" and "/" not in val.path:
+            # A File-valued variable renders as the raw exec path, which is
+            # exactly default File stringification - unlike location
+            # expansion, which would add a "./" prefix to a path without a
+            # "/" (_add_single's fallback would render it that way).
+            args.add(val)
+        else:
+            # The whole argument is a single dynamic value; emitted in its
+            # tagged form, which renders without re-parsing.
+            _add_single(args, val)
     else:
-        vals = [_strip(sv[0]) if len(sv) == 1 else tuple(sv) for sv in site_vals]
+        vals = [_strip(sv[0]) if len(sv) == 1 else tuple(["group"] + sv) for sv in site_vals]
         args.add_all(
             [tuple([input] + vals)],
             map_each = expand_token_split if split else expand_token,
@@ -583,21 +647,24 @@ def _expander_init(ctx, targets = [], extra_vars = {}):
         supports_path_mapping = lambda: not state.get("unmappable", False),
     )
 
-def _genrule_vars(ctx, outs = [], inputs = []):
+# Sentinel for the rule's output directory: resolved to the parent directory
+# of the anchor file, which always lives at the package's root in the output
+# tree, so that $(RULEDIR) is rendered lazily and path mapped.
+_RULEDIR = struct(expanders_ruledir = True)
+
+def _genrule_vars(outs = [], inputs = []):
     """Returns extra_vars with genrule-style make variables.
 
     Provides $@ / $(@) (only with exactly one out), $(<) (only with exactly
     one input), $(@D) and $(RULEDIR), following genrule's semantics (and
-    bazel-lib's expand_variables). The values embed the output directory
-    path and thus become subject to path mapping via the output directory
-    splitting performed on make variable values.
+    bazel-lib's expand_variables). The values retain the given Files
+    directly and render lazily, so they are subject to path mapping.
 
     Referencing $@ with multiple outs or $(<) with multiple inputs fails
     with "$(@) not defined" / "$(<) not defined", since the variables are
     only defined when unambiguous.
 
     Args:
-        ctx: The rule context.
         outs: The list of output Files backing $@ and $(@D).
         inputs: The list of input Files backing $(<).
 
@@ -605,20 +672,14 @@ def _genrule_vars(ctx, outs = [], inputs = []):
         A dict to pass (possibly after overlaying additional variables) as
         the extra_vars parameter of expanders.make.
     """
-    parts = [ctx.bin_dir.path]
-    if ctx.label.workspace_root:
-        parts.append(ctx.label.workspace_root)
-    if ctx.label.package:
-        parts.append(ctx.label.package)
-    rule_dir = "/".join(parts)
-    vars = {"RULEDIR": rule_dir}
+    vars = {"RULEDIR": _RULEDIR}
     if len(outs) == 1:
-        vars["@"] = outs[0].path
-        vars["@D"] = outs[0].path if outs[0].is_directory else outs[0].dirname
+        vars["@"] = outs[0]
+        vars["@D"] = outs[0] if outs[0].is_directory else (outs[0], "dirname")
     else:
-        vars["@D"] = rule_dir
+        vars["@D"] = _RULEDIR
     if len(inputs) == 1:
-        vars["<"] = inputs[0].path
+        vars["<"] = inputs[0]
     return vars
 
 expanders = struct(

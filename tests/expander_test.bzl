@@ -23,6 +23,18 @@ load("//:support.bzl", "write_lines")
 # the constant "cfg".
 _MAPPED_BIN_DIR = "bazel-out/cfg/bin"
 
+def _stringify_var(ctx, value):
+    if type(value) == "string":
+        return value
+    if type(value) == "File":
+        return value.path
+    if type(value) == "tuple":
+        path = value[0].path
+        return path[:path.rfind("/")]
+
+    # The RULEDIR sentinel.
+    return "/".join([p for p in (ctx.bin_dir.path, ctx.label.workspace_root, ctx.label.package) if p])
+
 def _do_expand_impl(ctx):
     for out in ctx.outputs.outs:
         ctx.actions.write(out, "")
@@ -31,7 +43,7 @@ def _do_expand_impl(ctx):
 
     extra_vars = {}
     if ctx.attr.use_genrule_vars:
-        extra_vars = expanders.genrule_vars(ctx, outs = ctx.outputs.outs, inputs = ctx.files.srcs)
+        extra_vars = expanders.genrule_vars(outs = ctx.outputs.outs, inputs = ctx.files.srcs)
     extra_vars.update(ctx.attr.extra_vars)
 
     # An extra variable whose value embeds the output directory path, like
@@ -41,9 +53,12 @@ def _do_expand_impl(ctx):
     expander = expanders.make(ctx, targets = targets, extra_vars = extra_vars)
 
     if ctx.attr.with_expected:
+        # Native expansion only accepts string values; genrule_vars retains
+        # Files and sentinels, so stringify them the way they will render.
+        native_vars = {k: _stringify_var(ctx, v) for k, v in extra_vars.items()}
         expanded = []
         for input in ctx.attr.expand:
-            native = ctx.expand_make_variables("expand", ctx.expand_location(input, targets), extra_vars)
+            native = ctx.expand_make_variables("expand", ctx.expand_location(input, targets), native_vars)
             if ctx.attr.split:
                 expanded.extend([chunk for chunk in native.split(" ") if chunk])
             else:

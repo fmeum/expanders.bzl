@@ -231,8 +231,12 @@ expander_test(
         "$(RULEDIR)",
         "$(<)",
         "--out=$@ --in=$(<)",
+        # A File-valued variable referenced from another variable's value:
+        # the group contains a bare File.
+        "$(NEST)",
     ],
     expect_supports_path_mapping = "yes",
+    extra_vars = {"NEST": "p-$(@)-s"},
     use_genrule_vars = True,
 )
 
