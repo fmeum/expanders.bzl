@@ -1,6 +1,6 @@
 """Starlark replacement for genrule. Not yet feature_complete."""
 
-load("//third_party/bazel_rules/expanders:expanders.bzl", "expanders")
+load(":expanders.bzl", "expanders")
 
 # Translate output_list into an iterable that this can handle.
 def _iterable_outputs(outputs):
